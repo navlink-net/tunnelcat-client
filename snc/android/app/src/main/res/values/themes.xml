@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Splash theme: shown immediately on launch before any code runs.
+         MainActivity switches to Theme.SNC in onCreate() before setContentView(). -->
+    <style name="Theme.SNC.Splash" parent="Theme.AppCompat.NoActionBar">
+        <item name="android:windowBackground">@drawable/splash_background</item>
+        <item name="android:windowFullscreen">false</item>
+        <item name="android:statusBarColor">@color/splashBg</item>
+        <item name="android:navigationBarColor">@color/splashBg</item>
+    </style>
+
+    <!-- Normal app theme used after the splash — SNC palette (VisualStyle.md §4.5). -->
+    <style name="Theme.SNC" parent="Theme.AppCompat.NoActionBar">
+        <item name="android:statusBarColor">@color/navBg</item>
+        <item name="android:navigationBarColor">@color/navBg</item>
+        <item name="android:windowBackground">@color/navBg</item>
+        <item name="android:textColorPrimary">@color/navText</item>
+        <item name="android:textColorSecondary">@color/navSubtext</item>
+        <item name="editTextStyle">@style/NavEditText</item>
+    </style>
+
+    <!-- Styled EditText for key entry field. -->
+    <style name="NavEditText" parent="Widget.AppCompat.EditText">
+        <item name="android:textColor">@color/navText</item>
+        <item name="android:textColorHint">@color/navSubtext</item>
+        <item name="android:background">@color/navSurface</item>
+    </style>
+</resources>

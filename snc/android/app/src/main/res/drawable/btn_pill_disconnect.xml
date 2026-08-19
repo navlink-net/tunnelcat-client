@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Convex red pill for the Disconnect state of the same button. -->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:state_pressed="true">
+        <shape android:shape="rectangle">
+            <corners android:radius="999dp" />
+            <gradient
+                android:angle="270"
+                android:startColor="#E0331F"
+                android:centerColor="#B8250F"
+                android:endColor="#8F1C0B" />
+        </shape>
+    </item>
+    <item>
+        <shape android:shape="rectangle">
+            <corners android:radius="999dp" />
+            <gradient
+                android:angle="270"
+                android:startColor="#FF6A5A"
+                android:centerColor="#E0331F"
+                android:endColor="#B8250F" />
+        </shape>
+    </item>
+</selector>

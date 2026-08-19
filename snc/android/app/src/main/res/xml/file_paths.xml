@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- Exposes cacheDir/snc-logs.zip for the share sheet. -->
+    <cache-path name="logs" path="." />
+    <!-- Exposes filesDir/snc-update.apk for the install intent. -->
+    <files-path name="update" path="." />
+</paths>

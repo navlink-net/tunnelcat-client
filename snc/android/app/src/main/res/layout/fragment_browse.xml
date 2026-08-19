@@ -1,0 +1,99 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:background="@color/navBg">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="48dp"
+        android:orientation="horizontal"
+        android:background="@color/navSurface"
+        android:gravity="center_vertical"
+        android:paddingHorizontal="4dp">
+
+        <ImageButton
+            android:id="@+id/btnNavBack"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:src="@drawable/ic_arrow_back"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:tint="@color/navText"
+            android:contentDescription="Back" />
+
+        <ImageButton
+            android:id="@+id/btnNavForward"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:src="@drawable/ic_arrow_forward"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:tint="@color/navText"
+            android:contentDescription="Forward" />
+
+        <EditText
+            android:id="@+id/urlBar"
+            android:layout_width="0dp"
+            android:layout_height="36dp"
+            android:layout_weight="1"
+            android:hint="@string/browse_address_hint"
+            android:inputType="textUri"
+            android:imeOptions="actionGo"
+            android:singleLine="true"
+            android:textSize="13sp"
+            android:textColor="@color/navText"
+            android:textColorHint="@color/navSubtext"
+            android:background="@color/navBg"
+            android:paddingHorizontal="8dp"
+            android:layout_marginHorizontal="4dp" />
+
+        <ImageButton
+            android:id="@+id/btnReload"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:src="@drawable/ic_refresh"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:tint="@color/navText"
+            android:contentDescription="Reload" />
+
+        <ImageButton
+            android:id="@+id/btnTabs"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:src="@drawable/ic_more_vert"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:tint="@color/navText"
+            android:contentDescription="Tabs" />
+
+    </LinearLayout>
+
+    <ProgressBar
+        android:id="@+id/progressBar"
+        style="?android:attr/progressBarStyleHorizontal"
+        android:layout_width="match_parent"
+        android:layout_height="3dp"
+        android:max="100"
+        android:progressTint="@color/navAccent"
+        android:visibility="gone" />
+
+    <FrameLayout
+        android:id="@+id/webViewContainer"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1">
+
+        <!-- WebView is created programmatically in BrowseFragment.onResume() and
+             destroyed in onPause() so the WebView renderer process (and its V8 heap)
+             is reset on every tab switch, preventing multi-day V8 accumulation ANR. -->
+
+        <ProgressBar
+            android:id="@+id/pageSpinner"
+            android:layout_width="56dp"
+            android:layout_height="56dp"
+            android:layout_gravity="center"
+            android:indeterminateTint="@color/navAccent"
+            android:visibility="gone" />
+
+    </FrameLayout>
+
+</LinearLayout>

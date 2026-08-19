@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Splash window background: dark tunnel colour + centered logo. -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:drawable="@color/splashBg" />
+    <item>
+        <bitmap
+            android:gravity="center"
+            android:src="@drawable/snc_idle" />
+    </item>
+</layer-list>

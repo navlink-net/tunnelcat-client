@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- The launcher script is the entry point; the real binary lives in MacOS/ too. -->
+    <key>CFBundleExecutable</key>
+    <string>ShortNerdCat.sh</string>
+
+    <key>CFBundleIdentifier</key>
+    <string>net.navlink.shortnerdcat</string>
+
+    <key>CFBundleName</key>
+    <string>ShortNerdCat</string>
+
+    <key>CFBundleDisplayName</key>
+    <string>ShortNerdCat</string>
+
+    <key>CFBundleVersion</key>
+    <string>1.0</string>
+
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+
+    <!-- LSUIElement hides the app from the Dock; it lives only in the menu bar. -->
+    <key>LSUIElement</key>
+    <true/>
+
+    <key>LSMinimumSystemVersion</key>
+    <string>12.0</string>
+
+    <key>NSHighResolutionCapable</key>
+    <true/>
+
+    <!-- Required for network access without sandbox denial. -->
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsArbitraryLoads</key>
+        <true/>
+    </dict>
+
+    <!-- navlink:// URL scheme for key activation deep links. -->
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>navlink</string>
+            </array>
+            <key>CFBundleURLName</key>
+            <string>net.navlink.activate</string>
+        </dict>
+    </array>
+</dict>
+</plist>

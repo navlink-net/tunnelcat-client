@@ -1,0 +1,3 @@
+# PNG assets are copied here by build.sh before compilation.
+# Source: win-client/windows/assets/*.png
+# Required files: snc_idle.png snc_connecting.png snc_connected.png snc_error.png snc_vless.png bg.png

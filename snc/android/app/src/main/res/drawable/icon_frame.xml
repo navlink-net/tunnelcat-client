@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Rounded frame around the state icon: translucent dark fill + screen-cyan border. -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android">
+    <solid android:color="#4407090D" />
+    <stroke android:width="2dp" android:color="#8859C8FF" />
+    <corners android:radius="18dp" />
+</shape>

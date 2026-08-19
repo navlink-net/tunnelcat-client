@@ -1,0 +1,8 @@
+# Force LF line endings for scripts regardless of the checkout platform's
+# core.autocrlf setting -- a CRLF shell script fails at the shebang line on
+# Linux ("$'bash\r': No such file or directory"). Confirmed bug 2026-08-11:
+# snc/linux/build.sh and snc/ios/build.sh had silently picked up CRLF (no
+# .gitattributes existed to prevent it) and were unusable on a fresh Linux
+# clone.
+*.sh text eol=lf
+*.bash text eol=lf

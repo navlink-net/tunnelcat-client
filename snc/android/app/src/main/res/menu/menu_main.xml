@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="utf-8"?>
+<menu xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto">
+
+    <item
+        android:id="@+id/menu_disable_ipv6"
+        android:title="@string/disable_ipv6"
+        android:checkable="true"
+        app:showAsAction="never" />
+
+    <item
+        android:id="@+id/menu_disable_udp"
+        android:title="@string/disable_udp_tunnel"
+        android:checkable="true"
+        android:visible="false"
+        app:showAsAction="never" />
+
+    <item
+        android:id="@+id/menu_disable_quic"
+        android:title="@string/disable_quic"
+        android:checkable="true"
+        app:showAsAction="never" />
+
+    <item
+        android:id="@+id/menu_disable_bypass"
+        android:title="@string/disable_bypass"
+        android:checkable="true"
+        app:showAsAction="never" />
+
+    <item
+        android:id="@+id/menu_recommend_cat_club"
+        android:title="@string/recommend_cat_club"
+        android:visible="false"
+        app:showAsAction="never" />
+
+    <item
+        android:id="@+id/menu_club_theme"
+        android:title="@string/club_theme"
+        android:visible="false"
+        app:showAsAction="never">
+        <menu>
+            <group android:id="@+id/group_club_theme" android:checkableBehavior="single">
+                <item
+                    android:id="@+id/menu_club_theme_regular"
+                    android:title="@string/club_theme_regular" />
+                <item
+                    android:id="@+id/menu_club_theme_catclub"
+                    android:title="@string/club_theme_catclub" />
+                <item
+                    android:id="@+id/menu_club_theme_elite"
+                    android:title="@string/club_theme_elite" />
+            </group>
+        </menu>
+    </item>
+
+    <item
+        android:id="@+id/menu_share_logs"
+        android:title="@string/share_logs"
+        app:showAsAction="never" />
+
+    <item
+        android:id="@+id/menu_update"
+        android:title="@string/update_ready"
+        android:visible="false"
+        app:showAsAction="never" />
+
+    <item
+        android:id="@+id/menu_logout"
+        android:title="@string/logout"
+        app:showAsAction="never" />
+
+</menu>

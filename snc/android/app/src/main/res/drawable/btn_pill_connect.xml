@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Convex blue pill for the Connect button. Vertical gradient stands in for
+     the glossy top-highlight used on desktop (GDI/CSS); XML shape drawables
+     can't do a clipped highlight band, so the gradient plus press-darken
+     carries the "convex" read here. -->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:state_pressed="true">
+        <shape android:shape="rectangle">
+            <corners android:radius="999dp" />
+            <gradient
+                android:angle="270"
+                android:startColor="#1F78E0"
+                android:centerColor="#1560C0"
+                android:endColor="#0F4A94" />
+        </shape>
+    </item>
+    <item>
+        <shape android:shape="rectangle">
+            <corners android:radius="999dp" />
+            <gradient
+                android:angle="270"
+                android:startColor="#4AA3FF"
+                android:centerColor="#1F78E0"
+                android:endColor="#1560C0" />
+        </shape>
+    </item>
+</selector>

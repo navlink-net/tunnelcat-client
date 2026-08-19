@@ -1,0 +1,24 @@
+#!/bin/sh
+set -e
+
+# Ensure data and log directories exist with correct permissions.
+mkdir -p /var/lib/shortnerdcat
+mkdir -p /var/lib/shortnerdcat/logs
+chmod 0700 /var/lib/shortnerdcat
+chmod 0755 /var/lib/shortnerdcat/logs
+
+# Binary must be owned by root and not world-writable for pkexec to accept it.
+chown root:root /usr/bin/shortnerdcat
+chmod 0755 /usr/bin/shortnerdcat
+
+# Register navlink:// URI scheme handler.
+if command -v update-desktop-database >/dev/null 2>&1; then
+    update-desktop-database /usr/share/applications || true
+fi
+
+# Reload systemd and enable+start the service.
+if command -v systemctl >/dev/null 2>&1; then
+    systemctl daemon-reload
+    systemctl enable shortnerdcat.service || true
+    systemctl start  shortnerdcat.service || true
+fi

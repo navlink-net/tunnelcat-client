@@ -1,0 +1,6 @@
+# Icons are copied here by deploy/linux/build.sh before compilation.
+# Required files (same PNGs as macos-client/macos/assets/):
+#   snc_idle.png
+#   snc_connecting.png
+#   snc_connected.png
+#   snc_error.png

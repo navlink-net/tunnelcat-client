@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=Tunnel Cat
+Comment=Secure internet tunnel by Navlink
+Exec=/usr/bin/shortnerdcat %u
+Icon=network-vpn
+Type=Application
+Categories=Network;
+MimeType=x-scheme-handler/navlink;
+NoDisplay=true

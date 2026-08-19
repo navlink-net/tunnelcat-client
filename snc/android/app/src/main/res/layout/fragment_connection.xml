@@ -1,0 +1,314 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent">
+
+<!-- Full-bleed state illustration: the only cat image on screen, stretched to
+     fill the window like on the desktop clients. No small/duplicate icon. -->
+<ImageView
+    android:id="@+id/imgState"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:src="@drawable/snc_idle"
+    android:scaleType="centerCrop" />
+
+<!-- Dark scrim so form controls stay readable over the illustration,
+     lighter than before so the illustration itself stays visibly bright. -->
+<View
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#5A07090D" />
+
+<LinearLayout
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical">
+
+    <LinearLayout
+        android:id="@+id/rootLayout"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:orientation="vertical"
+        android:gravity="top"
+        android:paddingHorizontal="24dp"
+        android:paddingTop="56dp"
+        android:paddingBottom="24dp">
+
+        <!-- App title with dark pill backdrop for readability -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center_horizontal"
+            android:text="@string/app_name"
+            android:textSize="28sp"
+            android:textStyle="bold"
+            android:textColor="@color/navText"
+            android:gravity="center"
+            android:paddingHorizontal="20dp"
+            android:paddingVertical="6dp"
+            android:background="@drawable/text_pill"
+            android:layout_marginBottom="24dp" />
+
+        <EditText
+            android:id="@+id/editKey"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1"
+            android:hint="@string/hint_key"
+            android:inputType="textMultiLine|textNoSuggestions"
+            android:gravity="top"
+            android:fontFamily="monospace"
+            android:textSize="12sp"
+            android:textColor="@color/navText"
+            android:textColorHint="@color/navSubtext"
+            android:padding="12dp"
+            android:background="@color/navSurface"
+            android:layout_marginBottom="8dp" />
+
+        <Button
+            android:id="@+id/btnScan"
+            android:layout_width="match_parent"
+            android:layout_height="44dp"
+            android:text="@string/scan_qr"
+            android:textSize="14sp"
+            android:backgroundTint="@color/navAccentAlt"
+            android:textColor="@color/navText"
+            android:layout_marginBottom="8dp" />
+
+        <Button
+            android:id="@+id/btnScanFile"
+            android:layout_width="match_parent"
+            android:layout_height="44dp"
+            android:text="@string/scan_qr_file"
+            android:textSize="14sp"
+            android:backgroundTint="@color/navAccentAlt"
+            android:textColor="@color/navText"
+            android:layout_marginBottom="8dp" />
+
+        <Button
+            android:id="@+id/btnActivateKey"
+            android:layout_width="match_parent"
+            android:layout_height="52dp"
+            android:text="@string/activate_key"
+            android:textSize="16sp"
+            android:textStyle="bold"
+            android:backgroundTint="@color/navAccent"
+            android:textColor="@color/navText"
+            android:layout_marginBottom="8dp" />
+
+        <Button
+            android:id="@+id/btnKeyEntryLogin"
+            android:layout_width="match_parent"
+            android:layout_height="44dp"
+            android:text="@string/log_in_instead"
+            android:textSize="14sp"
+            android:backgroundTint="@color/navSurface"
+            android:textColor="@color/navSubtext"
+            android:visibility="gone"
+            android:layout_marginBottom="16dp" />
+
+        <!-- "Do you have a key?" prompt: shown first when there's no saved key. -->
+        <LinearLayout
+            android:id="@+id/haveKeyGroup"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:visibility="gone">
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="@string/have_key_question"
+                android:textSize="16sp"
+                android:textColor="@color/navText"
+                android:gravity="center"
+                android:layout_marginBottom="16dp" />
+
+            <Button
+                android:id="@+id/btnHaveKeyYes"
+                android:layout_width="match_parent"
+                android:layout_height="52dp"
+                android:text="@string/have_key_yes"
+                android:textSize="16sp"
+                android:textStyle="bold"
+                android:backgroundTint="@color/navAccent"
+                android:textColor="@color/navText"
+                android:layout_marginBottom="8dp" />
+
+            <Button
+                android:id="@+id/btnHaveKeyNo"
+                android:layout_width="match_parent"
+                android:layout_height="52dp"
+                android:text="@string/have_key_no"
+                android:textSize="16sp"
+                android:backgroundTint="@color/navSurface"
+                android:textColor="@color/navText"
+                android:layout_marginBottom="16dp" />
+        </LinearLayout>
+
+        <!-- Credential (email/password) login against navlink.net: shown when there's
+             no saved key and navlink.net was probed reachable. -->
+        <LinearLayout
+            android:id="@+id/credentialLoginGroup"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:visibility="gone">
+
+            <EditText
+                android:id="@+id/editEmail"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:hint="@string/login_email_hint"
+                android:inputType="textEmailAddress"
+                android:textColor="@color/navText"
+                android:textColorHint="@color/navSubtext"
+                android:padding="12dp"
+                android:background="@color/navSurface"
+                android:layout_marginBottom="8dp" />
+
+            <FrameLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="8dp">
+
+                <EditText
+                    android:id="@+id/editPassword"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:hint="@string/login_password_hint"
+                    android:inputType="textPassword"
+                    android:textColor="@color/navText"
+                    android:textColorHint="@color/navSubtext"
+                    android:padding="12dp"
+                    android:paddingEnd="48dp"
+                    android:background="@color/navSurface" />
+
+                <ImageButton
+                    android:id="@+id/btnTogglePassword"
+                    android:layout_width="40dp"
+                    android:layout_height="match_parent"
+                    android:layout_gravity="end"
+                    android:background="?android:attr/selectableItemBackgroundBorderless"
+                    android:contentDescription="@string/toggle_password_visibility"
+                    android:src="@drawable/ic_eye"
+                    app:tint="@color/navSubtext" />
+
+            </FrameLayout>
+
+            <Button
+                android:id="@+id/btnDoLogin"
+                android:layout_width="match_parent"
+                android:layout_height="52dp"
+                android:text="@string/login_button"
+                android:textSize="16sp"
+                android:textStyle="bold"
+                android:backgroundTint="@color/navAccent"
+                android:textColor="@color/navText"
+                android:layout_marginBottom="8dp" />
+
+            <Button
+                android:id="@+id/btnSwitchToKeyEntry"
+                android:layout_width="match_parent"
+                android:layout_height="44dp"
+                android:text="@string/i_have_a_key"
+                android:textSize="14sp"
+                android:backgroundTint="@color/navSurface"
+                android:textColor="@color/navSubtext"
+                android:layout_marginBottom="16dp" />
+        </LinearLayout>
+
+        <Button
+            android:id="@+id/btnConnect"
+            android:layout_width="match_parent"
+            android:layout_height="52dp"
+            android:text="@string/connect"
+            android:textSize="15sp"
+            android:textStyle="bold"
+            android:textAllCaps="true"
+            android:background="@drawable/btn_pill_connect"
+            android:textColor="#FFFFFF"
+            android:layout_marginBottom="8dp" />
+
+    </LinearLayout>
+
+</LinearLayout>
+
+<!-- Version label: pushed well below the illustration's face, just above the
+     bottom status bar, so it no longer overlaps the cat. -->
+<TextView
+    android:id="@+id/textVersion"
+    android:layout_width="wrap_content"
+    android:layout_height="wrap_content"
+    android:layout_gravity="bottom|center_horizontal"
+    android:layout_marginBottom="50dp"
+    android:textSize="11sp"
+    android:textColor="@color/navSubtext"
+    android:gravity="center"
+    android:paddingHorizontal="12dp"
+    android:paddingVertical="3dp"
+    android:background="@drawable/text_pill" />
+
+<!-- Full-width top club-membership chevron, mirroring the bottom status
+     bar's shape/position but pinned to the very top of the illustration.
+     Cat Club: #59C8FF bg / white text. Elite Cat Club: #3B2412 bg / #FFD700
+     (gold) text, same palette as win/mac. Colors set in ConnectionFragment
+     since they're per-theme, not fixed like the status bar's per-state ones.
+     Gone unless there's a badge to show (real membership or admin preview). -->
+<TextView
+    android:id="@+id/textClubBadge"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:layout_gravity="top"
+    android:textSize="13sp"
+    android:textStyle="bold"
+    android:gravity="center"
+    android:paddingHorizontal="16dp"
+    android:paddingVertical="10dp"
+    android:visibility="gone" />
+
+<!-- Full-width bottom status bar, colored per tunnel state (mirrors the
+     win/mac/linux clients): gray=disconnected, orange=connecting,
+     green=connected, red=error (with the real message). -->
+<TextView
+    android:id="@+id/textStatus"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:layout_gravity="bottom"
+    android:text="@string/status_disconnected"
+    android:textSize="13sp"
+    android:textStyle="bold"
+    android:textColor="#FFFFFF"
+    android:gravity="center"
+    android:paddingHorizontal="16dp"
+    android:paddingVertical="10dp"
+    android:background="@color/navSubtext" />
+
+<!-- Status dots: bottom-left corner, above the status bar. CIDR dot + manifest dot.
+     Visible only while VPN is running; colored by Go-reported status. -->
+<LinearLayout
+    android:id="@+id/statusDots"
+    android:layout_width="wrap_content"
+    android:layout_height="wrap_content"
+    android:layout_gravity="bottom|start"
+    android:layout_margin="10dp"
+    android:layout_marginBottom="46dp"
+    android:orientation="horizontal"
+    android:visibility="gone">
+
+    <View
+        android:id="@+id/dotCidr"
+        android:layout_width="10dp"
+        android:layout_height="10dp" />
+
+    <View
+        android:id="@+id/dotManifest"
+        android:layout_width="10dp"
+        android:layout_height="10dp"
+        android:layout_marginStart="5dp" />
+
+</LinearLayout>
+
+</FrameLayout>

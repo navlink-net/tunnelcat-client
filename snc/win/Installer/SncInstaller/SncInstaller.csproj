@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net9.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>SncInstaller</AssemblyName>
+    <RootNamespace>SncInstaller</RootNamespace>
+    <ApplicationIcon>snc.ico</ApplicationIcon>
+    <Platforms>x64</Platforms>
+    <PublishSingleFile>true</PublishSingleFile>
+    <SelfContained>true</SelfContained>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <PublishTrimmed>false</PublishTrimmed>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Banner images, embedded directly in the EXE (loaded via
+         Assembly.GetManifestResourceStream in ProgressWindow.xaml.cs), same pattern as
+         vschool_server's ImmersiveLionInstaller. -->
+    <EmbeddedResource Include="Assets\Banners\*.png" />
+  </ItemGroup>
+
+</Project>

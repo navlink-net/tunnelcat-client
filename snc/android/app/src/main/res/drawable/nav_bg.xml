@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Main screen background — cosmic nebula image matching navlink.net style. -->
+<bitmap xmlns:android="http://schemas.android.com/apk/res/android"
+    android:src="@drawable/nav_bg_img"
+    android:gravity="fill"
+    android:tileMode="disabled" />

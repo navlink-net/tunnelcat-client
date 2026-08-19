@@ -1,0 +1,167 @@
+name: ShortNerdCat
+options:
+  bundleIdPrefix: net.shortnerdcat
+  deploymentTarget:
+    iOS: "16.0"
+  defaultConfig: Debug
+  xcodeVersion: "15.0"
+  createIntermediateGroups: true
+  groupSortPosition: top
+
+settings:
+  SWIFT_VERSION: "5.9"
+  ENABLE_BITCODE: "NO"
+  IPHONEOS_DEPLOYMENT_TARGET: "16.0"
+  DEVELOPMENT_TEAM: "HMYB536HEL"
+  TARGETED_DEVICE_FAMILY: "1"
+
+configs:
+  Debug: debug
+  Release: release
+
+# Explicit schemes — xcodegen 2.45.4 wasn't writing the auto-generated shared
+# schemes to xcshareddata/xcschemes, leaving only whichever target Xcode had
+# lazily auto-created in the UI selectable in the scheme picker.
+schemes:
+  ShortNerdCat:
+    build:
+      targets:
+        ShortNerdCat: all
+    run:
+      config: Debug
+    archive:
+      config: Release
+  SNCTunnel:
+    build:
+      targets:
+        SNCTunnel: all
+    run:
+      config: Debug
+    archive:
+      config: Release
+
+targets:
+
+  # ── Main application ─────────────────────────────────────────────────────────
+
+  ShortNerdCat:
+    type: application
+    platform: iOS
+    deploymentTarget: "16.0"
+    sources:
+      - path: SNCApp
+      - path: Shared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: net.shortnerdcat.client
+        INFOPLIST_FILE: SNCApp/Info.plist
+        CODE_SIGN_ENTITLEMENTS: SNCApp/ShortNerdCat.entitlements
+        SWIFT_VERSION: "5.9"
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: "HMYB536HEL"
+        TARGETED_DEVICE_FAMILY: "1"
+      debug:
+        CODE_SIGN_IDENTITY: "Apple Development"
+      release:
+        CODE_SIGN_IDENTITY: "Apple Distribution"
+        VALIDATE_PRODUCT: "YES"
+    entitlements:
+      path: SNCApp/ShortNerdCat.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.net.shortnerdcat
+        com.apple.developer.networking.networkextension:
+          - packet-tunnel-provider
+    dependencies:
+      - target: SNCTunnel
+        embed: true
+    info:
+      path: SNCApp/Info.plist
+      properties:
+        CFBundleName: ShortNerdCat
+        CFBundleDisplayName: ShortNerdCat
+        CFBundleShortVersionString: "1.0"
+        CFBundleVersion: "1"
+        UILaunchScreen:
+          UIColorName: ""
+          UIImageName: ""
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        NSCameraUsageDescription: "Used for scanning subscription QR codes"
+        NSLocalNetworkUsageDescription: "Required for VPN connectivity"
+        UIBackgroundModes:
+          - fetch
+        BGTaskSchedulerPermittedIdentifiers:
+          - net.shortnerdcat.client.vkrefresh
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+          UISceneConfigurations:
+            UIWindowSceneSessionRoleApplication:
+              - UISceneConfigurationName: Default Configuration
+                UISceneDelegateClassName: $(PRODUCT_MODULE_NAME).SceneDelegate
+
+  # ── Network Extension ─────────────────────────────────────────────────────────
+
+  SNCTunnel:
+    type: app-extension
+    platform: iOS
+    deploymentTarget: "16.0"
+    sources:
+      - path: SNCTunnel
+        excludes:
+          - "GoCore/libsnc_core.h"
+          - "GoCore/libsnc_core_arm64.a"
+      - path: Shared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: net.shortnerdcat.client.tunnel
+        INFOPLIST_FILE: SNCTunnel/Info.plist
+        CODE_SIGN_ENTITLEMENTS: SNCTunnel/SNCTunnel.entitlements
+        SWIFT_OBJC_BRIDGING_HEADER: SNCTunnel/GoCore/Bridging-Header.h
+        SWIFT_VERSION: "5.9"
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: "HMYB536HEL"
+        TARGETED_DEVICE_FAMILY: "1"
+        # Link the Go static library built by ios-client/build.sh.
+        # build.sh outputs to ios-client/build/; set SNCORE_LIB_DIR in Xcode
+        # scheme environment or override here with the actual path.
+        OTHER_LDFLAGS:
+          - "-lsnc_core_arm64"
+          - "-lresolv"
+          - "-framework CoreFoundation"
+          - "-framework Security"
+        LIBRARY_SEARCH_PATHS:
+          - "$(SRCROOT)/build"
+        HEADER_SEARCH_PATHS:
+          - "$(SRCROOT)/build"
+      debug:
+        CODE_SIGN_IDENTITY: "Apple Development"
+        OTHER_LDFLAGS:
+          - "-lsnc_core_arm64"
+          - "-lresolv"
+          - "-framework CoreFoundation"
+          - "-framework Security"
+      release:
+        CODE_SIGN_IDENTITY: "Apple Distribution"
+        OTHER_LDFLAGS:
+          - "-lsnc_core_arm64"
+          - "-lresolv"
+          - "-framework CoreFoundation"
+          - "-framework Security"
+    entitlements:
+      path: SNCTunnel/SNCTunnel.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.net.shortnerdcat
+        com.apple.developer.networking.networkextension:
+          - packet-tunnel-provider
+    info:
+      path: SNCTunnel/Info.plist
+      properties:
+        CFBundleName: SNCTunnel
+        CFBundleDisplayName: SNCTunnel
+        CFBundleShortVersionString: "1.0"
+        CFBundleVersion: "1"
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.networkextension.packet-tunnel
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).PacketTunnelProvider

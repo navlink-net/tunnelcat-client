@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- SNC palette (shortnerdcat/VisualStyle.md §4.5). Token names kept as
+         nav* to minimize the diff across every layout that references them;
+         only the hex values changed. -->
+
+    <!-- Splash / system bar colour. -->
+    <color name="splashBg">#11141A</color>
+
+    <!-- Main screen background — snc-bg-primary. -->
+    <color name="navBg">#11141A</color>
+
+    <!-- Card / input surface — snc-surface. -->
+    <color name="navSurface">#1B2028</color>
+
+    <!-- Primary action — snc-screen-cyan (active elements). -->
+    <color name="navAccent">#59C8FF</color>
+
+    <!-- Secondary/rare accent — snc-nerd-violet (guideline: ≤5% of the UI). -->
+    <color name="navAccentAlt">#8B7CFF</color>
+
+    <!-- Primary text — snc-text-primary. -->
+    <color name="navText">#F4F1E8</color>
+
+    <!-- Subdued text — snc-text-muted. -->
+    <color name="navSubtext">#99A2B0</color>
+
+    <!-- Additional SNC tokens (VisualStyle.md §4.5), not yet used by any
+         layout but named for future illustration/status work. -->
+    <color name="sncKittenBlack">#07090D</color>
+    <color name="sncFurHighlight">#252B34</color>
+    <color name="sncWarmAmber">#FFB547</color>
+    <color name="sncSoftLime">#A6D66D</color>
+</resources>

@@ -1,0 +1,12 @@
+Package: shortnerdcat
+Version: DEB_VERSION_PLACEHOLDER
+Architecture: DEB_ARCH_PLACEHOLDER
+Maintainer: ShortNerdCat <support@shortnerdcat.com>
+Depends: libgtk-3-0, DEB_APPIND_PLACEHOLDER, DEB_WEBKIT_PLACEHOLDER, policykit-1 | polkitd, zenity | kdialog, resolvconf | systemd-resolved
+Recommends: libnotify-bin
+Section: net
+Priority: optional
+Homepage: https://shortnerdcat.com
+Description: ShortNerdCat VPN client
+ Secure split-tunnel VPN client with automatic server selection,
+ DNS-over-HTTPS, and tray icon integration.

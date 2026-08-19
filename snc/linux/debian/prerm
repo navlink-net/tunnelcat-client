@@ -1,0 +1,8 @@
+#!/bin/sh
+set -e
+
+# Stop and disable the systemd service before files are removed.
+if command -v systemctl >/dev/null 2>&1; then
+    systemctl stop    shortnerdcat.service || true
+    systemctl disable shortnerdcat.service || true
+fi
