@@ -52,7 +52,7 @@ class SncBackgroundService : Service() {
         super.onCreate()
         instance = this
         KotlinLog.init(java.io.File(filesDir, "logs"))
-        KotlinLog.log("SncBackgroundService: created")
+        LogEvent.emitSystem(LogEvents.AndroidBgServiceLifecycle, LogAttrs.ATTR_Stage to "created")
         createNotificationChannel()
         createUpdateNotificationChannel()
         startForeground(NOTIFICATION_ID, buildNotification())
@@ -68,7 +68,7 @@ class SncBackgroundService : Service() {
     }
 
     override fun onDestroy() {
-        KotlinLog.log("SncBackgroundService: destroyed")
+        LogEvent.emitSystem(LogEvents.AndroidBgServiceLifecycle, LogAttrs.ATTR_Stage to "destroyed")
         instance = null
         updateChecker.stop()
         try { unregisterReceiver(updateReadyReceiver) } catch (_: Exception) {}
@@ -82,7 +82,7 @@ class SncBackgroundService : Service() {
     // Called by SNCVpnService before launching its own snc-core. Sends a graceful
     // stop to the background snc-core, then destroys it (SIGTERM; SIGKILL in 2 s).
     fun pauseForVpn() {
-        KotlinLog.log("SncBackgroundService: paused for VPN")
+        LogEvent.emitSystem(LogEvents.AndroidBgServiceLifecycle, LogAttrs.ATTR_Stage to "paused_for_vpn")
         ipcPath?.let { sendStop(it) }
         killCore()
         stopForeground(STOP_FOREGROUND_REMOVE)
@@ -92,7 +92,7 @@ class SncBackgroundService : Service() {
     // unrecoverable error). Re-reads prefs so a key configured after first launch
     // is picked up automatically.
     fun resumeAfterVpn() {
-        KotlinLog.log("SncBackgroundService: resumed after VPN")
+        LogEvent.emitSystem(LogEvents.AndroidBgServiceLifecycle, LogAttrs.ATTR_Stage to "resumed_after_vpn")
         startForeground(NOTIFICATION_ID, buildNotification())
         launchCore()
     }

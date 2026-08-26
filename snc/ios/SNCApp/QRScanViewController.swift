@@ -26,7 +26,7 @@ final class QRScanViewController: UIViewController {
         setupCapture()
 
         let cancelBtn = UIButton(type: .system)
-        cancelBtn.setTitle("Cancel", for: .normal)
+        cancelBtn.setTitle(L.t("common.cancel"), for: .normal)
         cancelBtn.tintColor = .white
         cancelBtn.titleLabel?.font = .systemFont(ofSize: 17)
         cancelBtn.translatesAutoresizingMaskIntoConstraints = false
@@ -34,7 +34,7 @@ final class QRScanViewController: UIViewController {
         view.addSubview(cancelBtn)
 
         let label = UILabel()
-        label.text = "Scan SNC key QR code"
+        label.text = L.t("qrscan.instructions")
         label.textColor = UIColor(white: 1, alpha: 0.7)
         label.font = .systemFont(ofSize: 14)
         label.textAlignment = .center
@@ -101,10 +101,10 @@ final class QRScanViewController: UIViewController {
 
     private func showCameraError() {
         let alert = UIAlertController(
-            title: "Camera unavailable",
-            message: "Allow camera access in Settings → ShortNerdCat → Camera",
+            title: L.t("qrscan.cameraUnavailableTitle"),
+            message: L.t("qrscan.cameraUnavailableMessage"),
             preferredStyle: .alert)
-        alert.addAction(UIAlertAction(title: "OK", style: .default) { [weak self] _ in
+        alert.addAction(UIAlertAction(title: L.t("common.ok"), style: .default) { [weak self] _ in
             self?.dismiss(animated: true)
         })
         DispatchQueue.main.async { self.present(alert, animated: true) }

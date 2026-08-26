@@ -97,8 +97,13 @@ if "!ANDROID_NDK_HOME!"=="" (
     exit /b 1
 )
 set NDK_CC=!ANDROID_NDK_HOME!\toolchains\llvm\prebuilt\windows-x86_64\bin\armv7a-linux-androideabi26-clang.cmd
+set NDK_CXX=!ANDROID_NDK_HOME!\toolchains\llvm\prebuilt\windows-x86_64\bin\armv7a-linux-androideabi26-clang++.cmd
 if not exist "!NDK_CC!" (
     echo ERROR: NDK clang not found at !NDK_CC! ^(ANDROID_NDK_HOME=!ANDROID_NDK_HOME!^)
+    exit /b 1
+)
+if not exist "!NDK_CXX!" (
+    echo ERROR: NDK clang++ not found at !NDK_CXX! ^(ANDROID_NDK_HOME=!ANDROID_NDK_HOME!^)
     exit /b 1
 )
 echo   NDK: !ANDROID_NDK_HOME!
@@ -107,6 +112,7 @@ set GOARCH=arm
 set GOARM=7
 set CGO_ENABLED=1
 set CC=!NDK_CC!
+set CXX=!NDK_CXX!
 go build -tags with_utls -ldflags="-s -w -X tunnel_cat/snc/core.Version=!VERSION!" ^
     -o "%OUTDIR%\snc-core.armv7" ^
     .\cmd\snc-core\
@@ -116,6 +122,7 @@ if errorlevel 1 (
 )
 set CGO_ENABLED=0
 set CC=
+set CXX=
 set GOARM=
 echo   OK: %OUTDIR%\snc-core.armv7
 

@@ -173,7 +173,7 @@ func loginDlgWndProc(hwnd, msg, wParam, lParam uintptr) uintptr {
 		editClass, _ := syscall.UTF16PtrFromString("EDIT")
 		btnClass, _ := syscall.UTF16PtrFromString("BUTTON")
 
-		emailLabel, _ := syscall.UTF16PtrFromString("Email:")
+		emailLabel, _ := syscall.UTF16PtrFromString(T("email_label"))
 		dlgUser32.NewProc("CreateWindowExW").Call(
 			0, uintptr(unsafe.Pointer(staticClass)), uintptr(unsafe.Pointer(emailLabel)),
 			wsChild|wsVisible, 20, 18, 440, 18, hwnd, 0, dlgKernelHandle(), 0)
@@ -183,7 +183,7 @@ func loginDlgWndProc(hwnd, msg, wParam, lParam uintptr) uintptr {
 			wsChild|wsVisible|wsTabStop|esAutoHScroll,
 			20, 38, 440, 24, hwnd, idEmail, dlgKernelHandle(), 0)
 
-		passLabel, _ := syscall.UTF16PtrFromString("Password:")
+		passLabel, _ := syscall.UTF16PtrFromString(T("password_label"))
 		dlgUser32.NewProc("CreateWindowExW").Call(
 			0, uintptr(unsafe.Pointer(staticClass)), uintptr(unsafe.Pointer(passLabel)),
 			wsChild|wsVisible, 20, 70, 440, 18, hwnd, 0, dlgKernelHandle(), 0)
@@ -193,25 +193,25 @@ func loginDlgWndProc(hwnd, msg, wParam, lParam uintptr) uintptr {
 			wsChild|wsVisible|wsTabStop|esAutoHScroll|esPassword,
 			20, 90, 390, 24, hwnd, idPass, dlgKernelHandle(), 0)
 
-		eyeText, _ := syscall.UTF16PtrFromString("Show")
+		eyeText, _ := syscall.UTF16PtrFromString(T("show"))
 		loginDlgState.eyeHwnd, _, _ = dlgUser32.NewProc("CreateWindowExW").Call(
 			0, uintptr(unsafe.Pointer(btnClass)), uintptr(unsafe.Pointer(eyeText)),
 			wsChild|wsVisible|wsTabStop,
 			420, 90, 40, 24, hwnd, idEye, dlgKernelHandle(), 0)
 
-		loginText, _ := syscall.UTF16PtrFromString("Login")
+		loginText, _ := syscall.UTF16PtrFromString(T("login_button"))
 		dlgUser32.NewProc("CreateWindowExW").Call(
 			0, uintptr(unsafe.Pointer(btnClass)), uintptr(unsafe.Pointer(loginText)),
 			wsChild|wsVisible|wsTabStop|bsDefPushButton,
 			20, 130, 140, 28, hwnd, idOK, dlgKernelHandle(), 0)
 
-		cancelText, _ := syscall.UTF16PtrFromString("Cancel")
+		cancelText, _ := syscall.UTF16PtrFromString(T("cancel"))
 		dlgUser32.NewProc("CreateWindowExW").Call(
 			0, uintptr(unsafe.Pointer(btnClass)), uintptr(unsafe.Pointer(cancelText)),
 			wsChild|wsVisible|wsTabStop,
 			170, 130, 140, 28, hwnd, idCancel, dlgKernelHandle(), 0)
 
-		keyModeText, _ := syscall.UTF16PtrFromString("I Have a Key")
+		keyModeText, _ := syscall.UTF16PtrFromString(T("i_have_a_key"))
 		dlgUser32.NewProc("CreateWindowExW").Call(
 			0, uintptr(unsafe.Pointer(btnClass)), uintptr(unsafe.Pointer(keyModeText)),
 			wsChild|wsVisible|wsTabStop,
@@ -242,11 +242,11 @@ func loginDlgWndProc(hwnd, msg, wParam, lParam uintptr) uintptr {
 			loginDlgState.passwordShown = !loginDlgState.passwordShown
 			if loginDlgState.passwordShown {
 				dlgUser32.NewProc("SendMessageW").Call(loginDlgState.passwordHwnd, emSetPasswordChar, 0, 0)
-				hideText, _ := syscall.UTF16PtrFromString("Hide")
+				hideText, _ := syscall.UTF16PtrFromString(T("hide"))
 				dlgUser32.NewProc("SetWindowTextW").Call(loginDlgState.eyeHwnd, uintptr(unsafe.Pointer(hideText)))
 			} else {
 				dlgUser32.NewProc("SendMessageW").Call(loginDlgState.passwordHwnd, emSetPasswordChar, uintptr('*'), 0)
-				showText, _ := syscall.UTF16PtrFromString("Show")
+				showText, _ := syscall.UTF16PtrFromString(T("show"))
 				dlgUser32.NewProc("SetWindowTextW").Call(loginDlgState.eyeHwnd, uintptr(unsafe.Pointer(showText)))
 			}
 			dlgUser32.NewProc("InvalidateRect").Call(loginDlgState.passwordHwnd, 0, 1)
@@ -283,7 +283,7 @@ func ShowLoginDialog() (email, password string, ok bool, wantsKeyMode bool) {
 		passwordShown bool
 	}{}
 
-	hwnd := createSimpleDialog("SNCLoginDlg", "ShortNerdCat — Log In", loginDlgCallback, 480, 200)
+	hwnd := createSimpleDialog("SNCLoginDlg", T("login_dialog_title"), loginDlgCallback, 480, 200)
 	if hwnd == 0 {
 		return "", "", false, false
 	}

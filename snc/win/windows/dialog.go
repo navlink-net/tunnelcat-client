@@ -16,6 +16,8 @@ import (
 	"unsafe"
 
 	"golang.org/x/sys/windows/registry"
+	"tunnel_cat/binlog"
+	"tunnel_cat/logevent"
 	"tunnel_cat/snc/core"
 )
 
@@ -66,7 +68,7 @@ func keyDlgWndProc(hwnd, msg, wParam, lParam uintptr) uintptr {
 	switch msg {
 	case wmCreate:
 		staticClass, _ := syscall.UTF16PtrFromString("STATIC")
-		labelText, _ := syscall.UTF16PtrFromString("Enter your activation key:")
+		labelText, _ := syscall.UTF16PtrFromString(T("key_entry_label"))
 		dlgUser32.NewProc("CreateWindowExW").Call(
 			0,
 			uintptr(unsafe.Pointer(staticClass)),
@@ -88,7 +90,7 @@ func keyDlgWndProc(hwnd, msg, wParam, lParam uintptr) uintptr {
 
 		btnClass, _ := syscall.UTF16PtrFromString("BUTTON")
 
-		scanText, _ := syscall.UTF16PtrFromString("Scan from Image")
+		scanText, _ := syscall.UTF16PtrFromString(T("scan_from_image"))
 		dlgUser32.NewProc("CreateWindowExW").Call(
 			0,
 			uintptr(unsafe.Pointer(btnClass)),
@@ -98,7 +100,7 @@ func keyDlgWndProc(hwnd, msg, wParam, lParam uintptr) uintptr {
 			hwnd, idScanImage,
 			dlgKernelHandle(), 0)
 
-		okText, _ := syscall.UTF16PtrFromString("OK")
+		okText, _ := syscall.UTF16PtrFromString(T("ok"))
 		dlgUser32.NewProc("CreateWindowExW").Call(
 			0,
 			uintptr(unsafe.Pointer(btnClass)),
@@ -108,7 +110,7 @@ func keyDlgWndProc(hwnd, msg, wParam, lParam uintptr) uintptr {
 			hwnd, idOK,
 			dlgKernelHandle(), 0)
 
-		cancelText, _ := syscall.UTF16PtrFromString("Cancel")
+		cancelText, _ := syscall.UTF16PtrFromString(T("cancel"))
 		dlgUser32.NewProc("CreateWindowExW").Call(
 			0,
 			uintptr(unsafe.Pointer(btnClass)),
@@ -119,7 +121,7 @@ func keyDlgWndProc(hwnd, msg, wParam, lParam uintptr) uintptr {
 			dlgKernelHandle(), 0)
 
 		if keyDlgState.showLoginBtn {
-			loginText, _ := syscall.UTF16PtrFromString("Log In Instead")
+			loginText, _ := syscall.UTF16PtrFromString(T("log_in_instead"))
 			dlgUser32.NewProc("CreateWindowExW").Call(
 				0,
 				uintptr(unsafe.Pointer(btnClass)),
@@ -143,8 +145,8 @@ func keyDlgWndProc(hwnd, msg, wParam, lParam uintptr) uintptr {
 			}
 			text, err := decodeQRFromImageFile(path)
 			if err != nil {
-				errMsg, _ := syscall.UTF16PtrFromString("Could not read QR code:\n\n" + err.Error())
-				errTitle, _ := syscall.UTF16PtrFromString("QR Scan Error")
+				errMsg, _ := syscall.UTF16PtrFromString(T("qr_scan_error_msg") + err.Error())
+				errTitle, _ := syscall.UTF16PtrFromString(T("qr_scan_error_title"))
 				dlgUser32.NewProc("MessageBoxW").Call(
 					hwnd,
 					uintptr(unsafe.Pointer(errMsg)),
@@ -166,8 +168,8 @@ func keyDlgWndProc(hwnd, msg, wParam, lParam uintptr) uintptr {
 			text := syscall.UTF16ToString(buf[:])
 			if _, err := core.ParseKeyString(text); err != nil {
 				errMsg, _ := syscall.UTF16PtrFromString(
-					"The activation key is not valid:\n\n" + err.Error())
-				errTitle, _ := syscall.UTF16PtrFromString("Invalid Key")
+					T("invalid_key_msg") + err.Error())
+				errTitle, _ := syscall.UTF16PtrFromString(T("invalid_key_title"))
 				dlgUser32.NewProc("MessageBoxW").Call(
 					hwnd,
 					uintptr(unsafe.Pointer(errMsg)),
@@ -250,7 +252,7 @@ func showKeyDialogImpl(showLoginBtn bool) (string, bool, bool) {
 	}
 
 	className, _ := syscall.UTF16PtrFromString("SNCKeyDlg")
-	titleText, _ := syscall.UTF16PtrFromString("ShortNerdCat â€” Activation Key")
+	titleText, _ := syscall.UTF16PtrFromString(T("key_dialog_title"))
 
 	wc := keyDlgWNDCLASSEX{
 		cbSize:        uint32(unsafe.Sizeof(keyDlgWNDCLASSEX{})),
@@ -288,7 +290,7 @@ func showKeyDialogImpl(showLoginBtn bool) (string, bool, bool) {
 		uintptr(x), uintptr(y), uintptr(dlgW), uintptr(dlgH),
 		0, 0, uintptr(dlgKernelHandle()), 0)
 	if hwnd == 0 {
-		core.Log.Printf("key dialog: CreateWindowExW failed")
+		logevent.Emit(binlog.TagSystem, logevent.EventWinWindowCreateFailed, logevent.Str(logevent.AttrWindow, "key_dialog"))
 		return "", false, false
 	}
 
@@ -347,7 +349,7 @@ type keyDlgWNDCLASSEX struct {
 // ShowError displays a modal error message box using the Windows API directly.
 // Safe to call before any message loop is running.
 func ShowError(msg string) {
-	title, _ := syscall.UTF16PtrFromString("ShortNerdCat")
+	title, _ := syscall.UTF16PtrFromString(T("app_title"))
 	text, _ := syscall.UTF16PtrFromString(msg)
 	dlgUser32.NewProc("MessageBoxW").Call(
 		0,
@@ -360,10 +362,8 @@ func ShowError(msg string) {
 // an update that has already been downloaded and verified by core.Updater
 // (see NotifyUpdateReady's caller). Returns true if the user picked "Yes".
 func ShowUpdateAvailableDialog(newVersion string) bool {
-	title, _ := syscall.UTF16PtrFromString("ShortNerdCat")
-	msg := fmt.Sprintf(
-		"A new version (%s) has been downloaded and is ready to install.\n\nRestart now to update?",
-		newVersion)
+	title, _ := syscall.UTF16PtrFromString(T("app_title"))
+	msg := fmt.Sprintf(T("update_available_msg"), newVersion)
 	text, _ := syscall.UTF16PtrFromString(msg)
 	ret, _, _ := dlgUser32.NewProc("MessageBoxW").Call(
 		0,
@@ -372,6 +372,20 @@ func ShowUpdateAvailableDialog(newVersion string) bool {
 		0x24) // MB_ICONQUESTION | MB_YESNO
 	const idYes = 6
 	return ret == idYes
+}
+
+// ShowWildcatWarning shows an unconditional, one-button informational
+// warning explaining WildCat mode's tradeoffs. Shown every time the user
+// turns WildCat mode on (see onWildcatChange in main_windows.go) -- there is
+// no "don't show again" state and no cancel, just an acknowledgement.
+func ShowWildcatWarning() {
+	title, _ := syscall.UTF16PtrFromString(T("wildcat_warning_title"))
+	text, _ := syscall.UTF16PtrFromString(T("wildcat_warning_message"))
+	dlgUser32.NewProc("MessageBoxW").Call(
+		0,
+		uintptr(unsafe.Pointer(text)),
+		uintptr(unsafe.Pointer(title)),
+		0x30) // MB_ICONWARNING | MB_OK
 }
 
 // â”€â”€ DPAPI key storage â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€

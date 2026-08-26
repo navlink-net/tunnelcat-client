@@ -17,6 +17,8 @@ import (
 	"syscall"
 	"time"
 
+	"tunnel_cat/binlog"
+	"tunnel_cat/logevent"
 	"tunnel_cat/snc/core"
 )
 
@@ -41,8 +43,9 @@ func hiddenCmd(name string, args ...string) *exec.Cmd {
 //     128.0.0.0/1 together cover every address and out-metric the original
 //     0.0.0.0/0 default route).
 //   - DNS (port 53) is captured by TUN like everything else and handled by
-//     snc/core/udp_assoc.go's own logic, which tunnels it by default (see
-//     that file's forwardOutbound). No OS-level route exclusion for the DNS server IP
+//     snc/core/udp_assoc.go's own per-mode logic, which already tunnels it
+//     by default and only goes direct in WildCat mode (see that file's
+//     forwardOutbound). No OS-level route exclusion for the DNS server IP
 //     exists here on purpose: an earlier "DNS bypass" route (removed
 //     2026-08-12, see the incident where a user's Google/YouTube/WhatsApp
 //     broke after DoH got toggled off) pre-empted that logic entirely by
@@ -88,31 +91,44 @@ func (r *RouteManager) Apply(serverHost, tunGW string) error {
 		return fmt.Errorf("resolve %s: %w", host, err)
 	}
 	r.serverAddrs = addrs
-	core.Log.Printf("routes: server %s resolved to %v", host, addrs)
+	logevent.Emit(binlog.TagSystem, logevent.EventWinRoutes,
+		logevent.Str(logevent.AttrStage, "server_resolved"),
+		logevent.Str(logevent.AttrDetail, fmt.Sprintf("%s -> %v", host, addrs)))
 
 	gw, err := getDefaultGateway()
 	if err != nil {
 		return fmt.Errorf("get default gateway: %w", err)
 	}
 	r.origGW = gw
-	core.Log.Printf("routes: default gateway = %s, tunGW = %s", gw, tunGW)
+	logevent.Emit(binlog.TagSystem, logevent.EventWinRoutes,
+		logevent.Str(logevent.AttrStage, "gateway_found"),
+		logevent.Str(logevent.AttrDetail, fmt.Sprintf("gw=%s tunGW=%s", gw, tunGW)))
 
 	// Record the original NIC IP before adding TUN routes.
 	if lip, err := localIPToGateway(gw); err == nil {
 		r.localIP = lip
-		core.Log.Printf("routes: original NIC IP = %s", lip)
+		logevent.Emit(binlog.TagSystem, logevent.EventWinRoutes,
+			logevent.Str(logevent.AttrStage, "local_ip_found"),
+			logevent.Str(logevent.AttrDetail, lip))
 	} else {
-		core.Log.Printf("routes: WARN could not determine local NIC IP: %v", err)
+		logevent.Emit(binlog.TagSystem, logevent.EventWinRoutes,
+			logevent.Str(logevent.AttrStage, "local_ip_failed"),
+			logevent.Str(logevent.AttrErr, err.Error()))
 	}
 
 	// Host routes for control-node IPs bypass the tunnel entirely.
 	for _, addr := range addrs {
 		if err := routeCmd("add", addr, "mask", "255.255.255.255", gw); err != nil {
-			core.Log.Printf("routes: WARN add server bypass %s: %v", addr, err)
+			logevent.Emit(binlog.TagSystem, logevent.EventWinRoutes,
+				logevent.Str(logevent.AttrStage, "server_bypass_failed"),
+				logevent.Str(logevent.AttrDetail, addr),
+				logevent.Str(logevent.AttrErr, err.Error()))
 			r.Restore()
 			return fmt.Errorf("add server route %s: %w", addr, err)
 		}
-		core.Log.Printf("routes: added server bypass %s via %s", addr, gw)
+		logevent.Emit(binlog.TagSystem, logevent.EventWinRoutes,
+			logevent.Str(logevent.AttrStage, "server_bypass_added"),
+			logevent.Str(logevent.AttrDetail, fmt.Sprintf("%s via %s", addr, gw)))
 	}
 
 	// No DNS bypass route here on purpose â€” see the RouteManager doc comment.
@@ -126,7 +142,9 @@ func (r *RouteManager) Apply(serverHost, tunGW string) error {
 		return fmt.Errorf("find TUN interface index for %s: %w", tunGW, err)
 	}
 	tunIdxStr := strconv.Itoa(tunIdx)
-	core.Log.Printf("routes: TUN interface index = %d", tunIdx)
+	logevent.Emit(binlog.TagSystem, logevent.EventWinRoutes,
+		logevent.Str(logevent.AttrStage, "tun_iface_found"),
+		logevent.Str(logevent.AttrDetail, tunIdxStr))
 
 	// Split-default routes redirect everything else through the TUN.
 	// From this point on all traffic goes via TUN â€” keep post-route work minimal.
@@ -134,13 +152,17 @@ func (r *RouteManager) Apply(serverHost, tunGW string) error {
 		r.Restore()
 		return fmt.Errorf("add split route 0/1: %w", err)
 	}
-	core.Log.Printf("routes: added 0.0.0.0/1 via %s if %d metric 1", tunGW, tunIdx)
+	logevent.Emit(binlog.TagSystem, logevent.EventWinRoutes,
+		logevent.Str(logevent.AttrStage, "split_route_added"),
+		logevent.Str(logevent.AttrDetail, fmt.Sprintf("0.0.0.0/1 via %s if %d metric 1", tunGW, tunIdx)))
 
 	if err := routeCmd("add", "128.0.0.0", "mask", "128.0.0.0", tunGW, "metric", "1", "if", tunIdxStr); err != nil {
 		r.Restore()
 		return fmt.Errorf("add split route 128/1: %w", err)
 	}
-	core.Log.Printf("routes: added 128.0.0.0/1 via %s if %d metric 1", tunGW, tunIdx)
+	logevent.Emit(binlog.TagSystem, logevent.EventWinRoutes,
+		logevent.Str(logevent.AttrStage, "split_route_added"),
+		logevent.Str(logevent.AttrDetail, fmt.Sprintf("128.0.0.0/1 via %s if %d metric 1", tunGW, tunIdx)))
 
 	// IPv6 split-default routes â€” mirror Android addRoute("::", 0).
 	// ::/1 and 8000::/1 together cover all IPv6 addresses and out-metric any
@@ -160,19 +182,26 @@ func (r *RouteManager) Apply(serverHost, tunGW string) error {
 	// the kill switch is on, also add an outbound Windows Firewall block for
 	// all IPv6 traffic -- removed again in Restore().
 	if core.IPv6TunnelDisabled() {
-		core.Log.Printf("routes: IPv6 disabled by arbiter â€” skipping IPv6 split route, blocking IPv6 egress")
+		logevent.Emit(binlog.TagSystem, logevent.EventWinRoutes, logevent.Str(logevent.AttrStage, "ipv6_disabled_blocking"))
 		if err := setIPv6FirewallBlock(true); err != nil {
-			core.Log.Printf("routes: WARN block IPv6 egress: %v", err)
+			logevent.Emit(binlog.TagSystem, logevent.EventWinRoutes,
+				logevent.Str(logevent.AttrStage, "ipv6_block_failed"),
+				logevent.Str(logevent.AttrErr, err.Error()))
 		} else {
 			r.ipv6Blocked = true
-			core.Log.Printf("routes: IPv6 egress blocked via Windows Firewall")
+			logevent.Emit(binlog.TagSystem, logevent.EventWinRoutes, logevent.Str(logevent.AttrStage, "ipv6_block_ok"))
 		}
 	} else {
 		for _, pfx := range []string{"::/1", "8000::/1"} {
 			if err := ip6RouteCmd("add", pfx); err != nil {
-				core.Log.Printf("routes: WARN add IPv6 split route %s: %v", pfx, err)
+				logevent.Emit(binlog.TagSystem, logevent.EventWinRoutes,
+					logevent.Str(logevent.AttrStage, "ipv6_route_failed"),
+					logevent.Str(logevent.AttrDetail, pfx),
+					logevent.Str(logevent.AttrErr, err.Error()))
 			} else {
-				core.Log.Printf("routes: added IPv6 %s via %s", pfx, tunIfaceName)
+				logevent.Emit(binlog.TagSystem, logevent.EventWinRoutes,
+					logevent.Str(logevent.AttrStage, "ipv6_route_added"),
+					logevent.Str(logevent.AttrDetail, pfx))
 			}
 		}
 	}
@@ -195,11 +224,16 @@ func (r *RouteManager) AddBypass(ip string) {
 		}
 	}
 	if err := routeCmd("add", ip, "mask", "255.255.255.255", r.origGW); err != nil {
-		core.Log.Printf("routes: WARN add bypass %s: %v", ip, err)
+		logevent.Emit(binlog.TagSystem, logevent.EventWinRoutes,
+			logevent.Str(logevent.AttrStage, "bypass_failed"),
+			logevent.Str(logevent.AttrDetail, ip),
+			logevent.Str(logevent.AttrErr, err.Error()))
 		return
 	}
 	r.serverAddrs = append(r.serverAddrs, ip)
-	core.Log.Printf("routes: added bypass %s via %s", ip, r.origGW)
+	logevent.Emit(binlog.TagSystem, logevent.EventWinRoutes,
+		logevent.Str(logevent.AttrStage, "bypass_added"),
+		logevent.Str(logevent.AttrDetail, fmt.Sprintf("%s via %s", ip, r.origGW)))
 }
 
 // Restore removes the TUN routes and the per-server bypass routes.
@@ -215,9 +249,11 @@ func (r *RouteManager) Restore() {
 	ip6RouteCmd("delete", "8000::/1") //nolint:errcheck
 	if r.ipv6Blocked {
 		if err := setIPv6FirewallBlock(false); err != nil {
-			core.Log.Printf("routes: WARN remove IPv6 egress block: %v", err)
+			logevent.Emit(binlog.TagSystem, logevent.EventWinRoutes,
+				logevent.Str(logevent.AttrStage, "ipv6_unblock_failed"),
+				logevent.Str(logevent.AttrErr, err.Error()))
 		} else {
-			core.Log.Printf("routes: IPv6 egress block removed")
+			logevent.Emit(binlog.TagSystem, logevent.EventWinRoutes, logevent.Str(logevent.AttrStage, "ipv6_unblocked"))
 		}
 		r.ipv6Blocked = false
 	}

@@ -42,8 +42,8 @@ func ipCmd(args ...string) error {
 //     incident where a user's Google/YouTube/WhatsApp broke on another
 //     platform after DoH got toggled off) pre-empted that logic entirely.
 //     Every call site in this client had already disabled it by hand before
-//     this cleanup; this just makes that the only behavior instead of a
-//     per-call-site opt-out.
+//     this cleanup (both normal and WildCat connects); this just makes that
+//     the only behavior instead of a per-call-site opt-out.
 type RouteManager struct {
 	origGW      string
 	origIface   string   // physical outbound interface name (e.g. "eth0", "wlan0")

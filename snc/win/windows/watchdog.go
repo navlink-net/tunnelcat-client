@@ -33,7 +33,8 @@ import (
 	"time"
 	"unsafe"
 
-	"tunnel_cat/snc/core"
+	"tunnel_cat/binlog"
+	"tunnel_cat/logevent"
 )
 
 const (
@@ -244,7 +245,9 @@ func TerminateProcess(h syscall.Handle) {
 // Removes DoH config and split-tunnel routes. Idempotent â€” safe to call even if
 // cleanup was already performed.
 func CleanupSession(origGW string) {
-	core.Log.Printf("watchdog: cleanup: restoring networking state (origGW=%q)", origGW)
+	logevent.Emit(binlog.TagSystem, logevent.EventWinWatchdogCleanup,
+		logevent.Str(logevent.AttrStage, "restoring"),
+		logevent.Str(logevent.AttrOrigGw, origGW))
 	CleanupDoH()
 	cleanupSplitRoutes(origGW)
 }
@@ -258,5 +261,5 @@ func cleanupSplitRoutes(origGW string) {
 		// Re-add plain-DNS bypass so 1.1.1.1 is reachable via the original gateway.
 		routeCmd("add", "1.1.1.1", "mask", "255.255.255.255", origGW) //nolint:errcheck
 	}
-	core.Log.Printf("watchdog: cleanup: routes removed")
+	logevent.Emit(binlog.TagSystem, logevent.EventWinWatchdogCleanup, logevent.Str(logevent.AttrStage, "routes_removed"))
 }

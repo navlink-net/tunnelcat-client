@@ -25,6 +25,18 @@
     android:layout_height="match_parent"
     android:orientation="vertical">
 
+    <!-- Mode ribbon: shown when WildCat is active. -->
+    <TextView
+        android:id="@+id/ribbonMode"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center"
+        android:paddingVertical="8dp"
+        android:textSize="13sp"
+        android:textStyle="bold"
+        android:textColor="#FFFFFF"
+        android:visibility="gone" />
+
     <LinearLayout
         android:id="@+id/rootLayout"
         android:layout_width="match_parent"
@@ -269,45 +281,87 @@
     android:paddingVertical="10dp"
     android:visibility="gone" />
 
-<!-- Full-width bottom status bar, colored per tunnel state (mirrors the
-     win/mac/linux clients): gray=disconnected, orange=connecting,
-     green=connected, red=error (with the real message). -->
-<TextView
-    android:id="@+id/textStatus"
+<!-- Bottom stack: counter/dots row THEN the status bar, in that document
+     order, inside a bottom-anchored vertical LinearLayout. This guarantees
+     the row never overlaps the status bar regardless of the status bar's
+     actual rendered height (which on-device turned out much taller than
+     the padding+text estimate that motivated the old fixed-margin
+     approach — margin-based placement kept overlapping no matter how much
+     margin was added, since it was never actually measured against the
+     status bar's real height). LinearLayout stacking removes the need to
+     guess that height at all: whatever it is, this row sits directly above
+     it. -->
+<LinearLayout
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
     android:layout_gravity="bottom"
-    android:text="@string/status_disconnected"
-    android:textSize="13sp"
-    android:textStyle="bold"
-    android:textColor="#FFFFFF"
-    android:gravity="center"
-    android:paddingHorizontal="16dp"
-    android:paddingVertical="10dp"
-    android:background="@color/navSubtext" />
+    android:orientation="vertical">
 
-<!-- Status dots: bottom-left corner, above the status bar. CIDR dot + manifest dot.
-     Visible only while VPN is running; colored by Go-reported status. -->
-<LinearLayout
-    android:id="@+id/statusDots"
-    android:layout_width="wrap_content"
-    android:layout_height="wrap_content"
-    android:layout_gravity="bottom|start"
-    android:layout_margin="10dp"
-    android:layout_marginBottom="46dp"
-    android:orientation="horizontal"
-    android:visibility="gone">
+    <!-- Status dots (bottom-left) + byte counter (bottom-right) share one row,
+         directly above the status bar. -->
+    <FrameLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content">
 
-    <View
-        android:id="@+id/dotCidr"
-        android:layout_width="10dp"
-        android:layout_height="10dp" />
+        <!-- Status dots: CIDR dot + manifest dot. Visible only while VPN is
+             running; colored by Go-reported status. -->
+        <LinearLayout
+            android:id="@+id/statusDots"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="start"
+            android:layout_margin="10dp"
+            android:orientation="horizontal"
+            android:visibility="gone">
 
-    <View
-        android:id="@+id/dotManifest"
-        android:layout_width="10dp"
-        android:layout_height="10dp"
-        android:layout_marginStart="5dp" />
+            <View
+                android:id="@+id/dotCidr"
+                android:layout_width="10dp"
+                android:layout_height="10dp" />
+
+            <View
+                android:id="@+id/dotManifest"
+                android:layout_width="10dp"
+                android:layout_height="10dp"
+                android:layout_marginStart="5dp" />
+
+        </LinearLayout>
+
+        <!-- Live uplink/downlink byte counter. Populated from snc.bytes
+             (written every 1s by the Go core's traffic-activity ticker, see
+             main_linux.go). Hidden while disconnected. No background pill —
+             plain text directly over the illustration, matching the Windows
+             client's transparent counter. -->
+        <TextView
+            android:id="@+id/textBandwidth"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="end"
+            android:layout_marginHorizontal="10dp"
+            android:layout_marginVertical="4dp"
+            android:textSize="11sp"
+            android:textStyle="bold"
+            android:textColor="#FFFFFF"
+            android:gravity="end"
+            android:visibility="gone" />
+
+    </FrameLayout>
+
+    <!-- Full-width bottom status bar, colored per tunnel state (mirrors the
+         win/mac/linux clients): gray=disconnected, orange=connecting,
+         green=connected, black=wildcat, red=error (with the real message). -->
+    <TextView
+        android:id="@+id/textStatus"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="@string/status_disconnected"
+        android:textSize="13sp"
+        android:textStyle="bold"
+        android:textColor="#FFFFFF"
+        android:gravity="center"
+        android:paddingHorizontal="16dp"
+        android:paddingVertical="10dp"
+        android:background="@color/navSubtext" />
 
 </LinearLayout>
 

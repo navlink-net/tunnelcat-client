@@ -9,7 +9,8 @@ package windows
 import (
 	"fmt"
 
-	"tunnel_cat/snc/core"
+	"tunnel_cat/binlog"
+	"tunnel_cat/logevent"
 )
 
 const (
@@ -49,7 +50,7 @@ func ConfigureDoH() error {
 	if err != nil {
 		return fmt.Errorf("netsh dns add encryption: %w (out: %s)", err, out)
 	}
-	core.Log.Printf("dns: DoH enabled â€” %s â†’ %s (tunneled)", dohServer, dohTemplate)
+	logevent.Emit(binlog.TagSystem, logevent.EventWinDnsConfig, logevent.Str(logevent.AttrStage, "doh_enabled"))
 	return nil
 }
 
@@ -62,9 +63,11 @@ func CleanupDoH() {
 	).CombinedOutput()
 	if err != nil {
 		// Not an error if the config was not set â€” ignore.
-		core.Log.Printf("dns: startup cleanup: no DoH config found (%s)", out)
+		logevent.Emit(binlog.TagSystem, logevent.EventWinDnsConfig,
+			logevent.Str(logevent.AttrStage, "cleanup_none_found"),
+			logevent.Str(logevent.AttrDetail, string(out)))
 	} else {
-		core.Log.Printf("dns: startup cleanup: removed stale DoH config for %s", dohServer)
+		logevent.Emit(binlog.TagSystem, logevent.EventWinDnsConfig, logevent.Str(logevent.AttrStage, "cleanup_removed"))
 	}
 }
 
@@ -85,7 +88,7 @@ func ConfigureDoHFallback() (*DoHProxy, error) {
 		proxy.stop()
 		return nil, fmt.Errorf("set TUN DNS to DoH proxy: %w", err)
 	}
-	core.Log.Printf("dns: DoH fallback active â€” TUN DNS=127.0.0.1 â†’ local proxy â†’ %s via tunnel", dohTemplate)
+	logevent.Emit(binlog.TagSystem, logevent.EventWinDnsConfig, logevent.Str(logevent.AttrStage, "doh_fallback_active"))
 	return proxy, nil
 }
 
@@ -104,9 +107,11 @@ func StopDoHFallback(proxy *DoHProxy) {
 	}
 	proxy.stop()
 	if err := setTUNDNS(tunIfaceName, dohServer); err != nil {
-		core.Log.Printf("dns: point TUN DNS at %s: %v", dohServer, err)
+		logevent.Emit(binlog.TagSystem, logevent.EventWinDnsConfig,
+			logevent.Str(logevent.AttrStage, "fallback_stop_failed"),
+			logevent.Str(logevent.AttrErr, err.Error()))
 	} else {
-		core.Log.Printf("dns: DoH proxy stopped, TUN DNS now %s directly (plain UDP, still tunneled)", dohServer)
+		logevent.Emit(binlog.TagSystem, logevent.EventWinDnsConfig, logevent.Str(logevent.AttrStage, "fallback_stopped"))
 	}
 }
 
@@ -119,8 +124,11 @@ func RestoreDoH() {
 		"server="+dohServer,
 	).CombinedOutput()
 	if err != nil {
-		core.Log.Printf("dns: DoH remove failed: %v (out: %s)", err, out)
+		logevent.Emit(binlog.TagSystem, logevent.EventWinDnsConfig,
+			logevent.Str(logevent.AttrStage, "doh_remove_failed"),
+			logevent.Str(logevent.AttrErr, err.Error()),
+			logevent.Str(logevent.AttrDetail, string(out)))
 	} else {
-		core.Log.Printf("dns: DoH removed for %s (queries stay plain-UDP, still tunneled)", dohServer)
+		logevent.Emit(binlog.TagSystem, logevent.EventWinDnsConfig, logevent.Str(logevent.AttrStage, "doh_removed"))
 	}
 }

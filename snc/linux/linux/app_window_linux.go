@@ -146,6 +146,19 @@ func (w *AppWindow) PushClubTheme(theme, badgeText string, isAdmin, canRecommend
 	w.RunJS("if(window.onClubThemeUpdate)window.onClubThemeUpdate(" + string(b) + ")")
 }
 
+// PushBytes sends the current cumulative uplink/downlink byte counters to
+// the window's JS -- see AppStatus's daemon-side counterpart, core.TotalBytes'
+// doc comment. Pushed once a second by the daemon regardless of connection
+// state; the JS side (window.onBytesUpdate) decides whether to display it
+// based on window.lastStatus.connected, same pattern as onStatusUpdate.
+func (w *AppWindow) PushBytes(sent, recv int64) {
+	b, _ := json.Marshal(struct {
+		Sent int64 `json:"sent"`
+		Recv int64 `json:"recv"`
+	}{Sent: sent, Recv: recv})
+	w.RunJS("if(window.onBytesUpdate)window.onBytesUpdate(" + string(b) + ")")
+}
+
 // RunLoginError shows an error message in the login panel's key-entry overlay.
 func (w *AppWindow) RunLoginError(msg string) {
 	b, _ := json.Marshal(msg)
@@ -294,16 +307,16 @@ func buildAppWindowHTML() string {
 	// them independent.
 	for _, name := range []string{
 		"illustration_idle.png", "illustration_connecting.png", "illustration_connected.png",
-		"illustration_error.png",
+		"illustration_wildcat.png", "illustration_error.png",
 		// Club-theme variants (see tunnel_cat/docs/club-membership.md) --
 		// same five states, palette-only variants. Their sncasset:// tokens
 		// appear in the JS catAssets map below, not as <img> src literals,
 		// so this ReplaceAll pass is the only place they get baked in.
 		"illustration_idle_catclub.png", "illustration_connecting_catclub.png",
-		"illustration_connected_catclub.png",
+		"illustration_connected_catclub.png", "illustration_wildcat_catclub.png",
 		"illustration_error_catclub.png",
 		"illustration_idle_elite.png", "illustration_connecting_elite.png",
-		"illustration_connected_elite.png",
+		"illustration_connected_elite.png", "illustration_wildcat_elite.png",
 		"illustration_error_elite.png",
 	} {
 		data := readAsset(name)
@@ -312,6 +325,15 @@ func buildAppWindowHTML() string {
 		}
 		uri := "data:image/png;base64," + base64.StdEncoding.EncodeToString(data)
 		html = strings.ReplaceAll(html, "sncasset://"+name, uri)
+	}
+	// Localize -- see i18n_linux.go/strings_linux.go. The template embeds
+	// {{T:key}} tokens (in visible HTML text and inside the JS I18N object
+	// literal at the top of <script>); resolve every known key against the
+	// detected UI language here, once, at HTML-build time. ReplaceAll is a
+	// no-op for keys whose token isn't present in the template, so this is
+	// safe to run unconditionally over the whole string table.
+	for key := range stringsEN {
+		html = strings.ReplaceAll(html, "{{T:"+key+"}}", T(key))
 	}
 	return html
 }
@@ -423,6 +445,18 @@ body{
 #status-bar.state-disconnected{background:#5b6470}
 #status-bar.state-connecting{background:#e08a2e}
 #status-bar.state-error{background:#c0392b}
+#status-bar.state-wildcat{background:#000}
+/* â”€â”€ Live uplink/downlink byte counter â”€â”€ sits bottom-right, just above the
+   status bar (never overlapping its centered text). Hidden by default;
+   window.onStatusUpdate toggles it on/off with the connected state, and
+   window.onBytesUpdate (pushed once a second by the daemon) fills in the
+   text -- see AppWindow.PushBytes / core.TotalBytes' doc comment. */
+#byte-counter{
+  display:none;position:absolute;right:10px;bottom:90px;z-index:3;
+  font-family:var(--font-mono);font-size:11px;letter-spacing:0.2px;
+  color:rgba(244,241,232,0.9);background:rgba(0,0,0,0.4);
+  padding:3px 8px;border-radius:6px;pointer-events:none;white-space:nowrap;
+}
 .btn{
   padding:11px 30px;border:none;border-radius:8px;font-size:13px;
   font-weight:700;letter-spacing:1.2px;cursor:pointer;transition:all .2s;
@@ -517,10 +551,10 @@ body{
   <!-- Have-key prompt: the very first thing shown when not logged in -->
   <div id="have-key-overlay">
     <img src="sncasset://illustration_idle.png" alt="">
-    <h2>Do you have a ShortNerdCat activation key?</h2>
+    <h2>{{T:have_key_question}}</h2>
     <div id="have-key-row">
-      <button class="btn btn-connect" onclick="handleHaveKeyAnswer(true)">Yes, I have a key</button>
-      <button class="btn btn-disconnect" onclick="handleHaveKeyAnswer(false)">No, I don't have one</button>
+      <button class="btn btn-connect" onclick="handleHaveKeyAnswer(true)">{{T:have_key_yes}}</button>
+      <button class="btn btn-disconnect" onclick="handleHaveKeyAnswer(false)">{{T:have_key_no}}</button>
     </div>
   </div>
 
@@ -528,31 +562,31 @@ body{
        user has no key but navlink.net is reachable directly. -->
   <div id="credential-login-overlay">
     <img src="sncasset://illustration_idle.png" alt="">
-    <h2>Log In</h2>
-    <input class="cred-input" type="email" id="cred-email" placeholder="Email" autocomplete="email">
+    <h2>{{T:login_heading}}</h2>
+    <input class="cred-input" type="email" id="cred-email" placeholder="{{T:email_placeholder}}" autocomplete="email">
     <div class="cred-pass-row">
-      <input class="cred-input" type="password" id="cred-password" placeholder="Password" autocomplete="current-password">
+      <input class="cred-input" type="password" id="cred-password" placeholder="{{T:password_placeholder}}" autocomplete="current-password">
       <button type="button" class="cred-eye" id="cred-password-eye" onclick="toggleCredPassword()">&#128065;</button>
     </div>
     <div id="credential-err"></div>
-    <button id="btn-do-login" class="btn btn-connect" onclick="handleCredentialLogin()">LOGIN</button>
-    <button id="btn-key-mode-switch" class="btn btn-disconnect" onclick="handleKeyModeSwitch()">I Have a Key</button>
+    <button id="btn-do-login" class="btn btn-connect" onclick="handleCredentialLogin()">{{T:login_button}}</button>
+    <button id="btn-key-mode-switch" class="btn btn-disconnect" onclick="handleKeyModeSwitch()">{{T:i_have_key}}</button>
   </div>
 
   <!-- Login overlay: key-entry panel -->
   <div id="login-overlay">
     <img src="sncasset://illustration_idle.png" alt="">
-    <h2>Tunnel Cat</h2>
-    <p>Paste your activation key to get started.</p>
-    <textarea id="key-input" placeholder="Paste activation key here..."></textarea>
+    <h2>{{T:tunnel_cat_heading}}</h2>
+    <p>{{T:paste_key_paragraph}}</p>
+    <textarea id="key-input" placeholder="{{T:paste_key_placeholder}}"></textarea>
     <div id="login-err"></div>
-    <button id="btn-activate" class="btn btn-connect" onclick="handleActivate()">ACTIVATE</button>
-    <button id="btn-login-switch" class="btn btn-disconnect" style="display:none" onclick="handleShowCredentialLogin()">Log In Instead</button>
+    <button id="btn-activate" class="btn btn-connect" onclick="handleActivate()">{{T:activate_button}}</button>
+    <button id="btn-login-switch" class="btn btn-disconnect" style="display:none" onclick="handleShowCredentialLogin()">{{T:log_in_instead}}</button>
   </div>
 
   <div class="tabs">
-    <div class="tab active" onclick="switchTab('tunnel',this)">TUNNEL</div>
-    <div class="tab"        onclick="switchTab('settings',this)">SETTINGS</div>
+    <div class="tab active" onclick="switchTab('tunnel',this)">{{T:tab_tunnel}}</div>
+    <div class="tab"        onclick="switchTab('settings',this)">{{T:tab_settings}}</div>
   </div>
   <div class="content">
     <div id="panel-tunnel" class="panel active">
@@ -561,60 +595,65 @@ body{
       <div id="tunnel-overlay">
         <div class="btn-row">
           <button id="btn-connect"    class="btn-pill"
-                  onclick="handleConnect()">Connect</button>
+                  onclick="handleConnect()">{{T:btn_connect}}</button>
           <button id="btn-disconnect" class="btn-pill btn-pill-disconnect"
-                  style="display:none" onclick="handleDisconnect()">Disconnect</button>
+                  style="display:none" onclick="handleDisconnect()">{{T:btn_disconnect}}</button>
         </div>
       </div>
-      <div id="status-bar" class="state-disconnected">Disconnected</div>
+      <div id="byte-counter" title="{{T:byte_counter_label}}"></div>
+      <div id="status-bar" class="state-disconnected">{{T:js_disconnected}}</div>
     </div>
     <div id="panel-settings" class="panel">
       <div class="settings-section">
-        <h3>Your Location</h3>
+        <h3>{{T:your_location}}</h3>
         <div class="srow">
-          <div class="srow-label">Region</div>
+          <div class="srow-label">{{T:region_label}}</div>
           <select class="region-sel" id="s-region" onchange="saveSettings()">
-            <option value="">Auto</option>
-            <option value="RU">Russia</option>
-            <option value="EU">Europe</option>
-            <option value="US">USA</option>
-            <option value="CN">China</option>
-            <option value="XX">Other</option>
+            <option value="">{{T:region_opt_auto}}</option>
+            <option value="RU">{{T:region_opt_russia}}</option>
+            <option value="EU">{{T:region_opt_europe}}</option>
+            <option value="US">{{T:region_opt_usa}}</option>
+            <option value="CN">{{T:region_opt_china}}</option>
+            <option value="XX">{{T:region_opt_other}}</option>
           </select>
         </div>
       </div>
       <div class="settings-section">
-        <h3>Connection Options</h3>
+        <h3>{{T:connection_options}}</h3>
         <div class="srow">
-          <div class="srow-label">DNS over HTTPS</div>
+          <div class="srow-label">{{T:wildcat_label}}</div>
+          <input type="checkbox" id="s-wildcat" onchange="saveSettings()">
+        </div>
+        <div class="srow">
+          <div class="srow-label">{{T:doh_label}}</div>
           <input type="checkbox" id="s-doh" onchange="saveSettings()">
         </div>
         <div class="srow" id="s-block-quic-row">
-          <div class="srow-label">Disable QUIC</div>
+          <div class="srow-label">{{T:disable_quic_label}}</div>
           <input type="checkbox" id="s-block-quic" onchange="saveSettings()">
         </div>
       </div>
       <div class="settings-section" id="club-theme-section" style="display:none">
-        <h3>Club Theme (admin preview)</h3>
+        <h3>{{T:club_theme_heading}}</h3>
         <div class="srow">
-          <div class="srow-label">Theme</div>
+          <div class="srow-label">{{T:theme_label}}</div>
           <select class="region-sel" id="s-club-theme" onchange="submitClubThemePreview()">
-            <option value="">Regular</option>
-            <option value="catclub">Cat Club</option>
-            <option value="elite">Elite Cat Club</option>
+            <option value="">{{T:theme_opt_regular}}</option>
+            <option value="catclub">{{T:theme_opt_catclub}}</option>
+            <option value="elite">{{T:theme_opt_elite}}</option>
           </select>
         </div>
       </div>
       <div class="settings-section" id="recommend-section" style="display:none">
-        <h3>Recommend new Cat Club members</h3>
+        <h3>{{T:recommend_heading}}</h3>
         <div class="srow" style="flex-direction:column;align-items:stretch;gap:8px">
-          <input type="text" id="recommend-username" placeholder="username to recommend"
+          <input type="text" id="recommend-username" placeholder="{{T:recommend_placeholder}}"
                  style="background:rgba(7,9,13,0.8);border:1px solid rgba(89,200,255,0.3);
                         border-radius:6px;color:var(--text-primary);padding:7px 10px;font-size:13px;outline:none">
           <button onclick="submitRecommend()"
                   style="background:rgba(89,200,255,0.15);border:1px solid rgba(89,200,255,0.4);
                          border-radius:6px;color:var(--screen-cyan);padding:7px 10px;font-size:12px;
-                         font-weight:600;cursor:pointer">Recommend</button>
+                         font-weight:600;cursor:pointer">{{T:recommend_button}}</button>
           <div id="recommend-status" style="font-size:11px;color:rgba(153,162,176,0.8)"></div>
         </div>
       </div>
@@ -622,6 +661,21 @@ body{
   </div>
 </div>
 <script>
+// I18N holds JS-side copies of a few status strings that get built into UI
+// text at runtime (as opposed to the static {{T:key}} tokens resolved
+// directly in the HTML above) -- populated at Go build-string time via the
+// same buildAppWindowHTML token-replacement pass, see i18n_linux.go /
+// strings_linux.go.
+const I18N = {
+  connecting: "{{T:js_connecting}}",
+  disconnecting: "{{T:js_disconnecting}}",
+  connected: "{{T:js_connected}}",
+  connectedWildcat: "{{T:js_connected_wildcat}}",
+  disconnected: "{{T:js_disconnected}}",
+  errorDefault: "{{T:js_error_default}}",
+  recommendSentPrefix: "{{T:js_recommend_sent_prefix}}",
+  recommendSentSuffix: "{{T:js_recommend_sent_suffix}}"
+};
 function switchTab(name,el){
   document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
   document.querySelectorAll('.panel').forEach(p=>p.classList.remove('active'));
@@ -642,6 +696,10 @@ function handleActivate() {
 // window.__navlinkReachable starts false (conservative) and is set once Go's
 // direct (non-tunneled) probe of navlink.net resolves -- see PushNavlinkReachable.
 window.__navlinkReachable = false;
+// window.__userNavigated tracks whether the user has manually picked an
+// overlay (credential login vs. key entry) -- once true, a reachability
+// update arriving late must never yank them off the screen they're on.
+window.__userNavigated = false;
 
 function showOverlay(id) {
   ['have-key-overlay', 'credential-login-overlay', 'login-overlay'].forEach(function(o) {
@@ -654,8 +712,23 @@ function showKeyEntry() {
   showOverlay('login-overlay');
 }
 
+// showDefaultLoginScreen is the entry point used when we first learn the
+// user is logged out -- the have-key-overlay is never shown automatically
+// any more (it stays in the DOM as dead code, still reachable only if
+// something manually triggers it). If navlink.net is already known
+// reachable, default straight to credential login; otherwise fall back to
+// key entry (the safe/conservative choice) until reachability resolves.
+function showDefaultLoginScreen() {
+  if (window.__navlinkReachable) {
+    showOverlay('credential-login-overlay');
+  } else {
+    showKeyEntry();
+  }
+}
+
 function handleHaveKeyAnswer(hasKey) {
   window.webkit.messageHandlers.sncHaveKeyAnswer.postMessage(hasKey);
+  window.__userNavigated = true;
   if (hasKey) {
     showKeyEntry();
   } else if (window.__navlinkReachable) {
@@ -665,10 +738,14 @@ function handleHaveKeyAnswer(hasKey) {
   }
 }
 
-function handleShowCredentialLogin() { showOverlay('credential-login-overlay'); }
+function handleShowCredentialLogin() {
+  window.__userNavigated = true;
+  showOverlay('credential-login-overlay');
+}
 
 function handleKeyModeSwitch() {
   window.webkit.messageHandlers.sncKeyModeSwitch.postMessage({});
+  window.__userNavigated = true;
   showKeyEntry();
 }
 
@@ -689,10 +766,19 @@ function handleCredentialLogin() {
 }
 
 window.onNavlinkReachable = function(reachable) {
+  var wasReachable = window.__navlinkReachable;
   window.__navlinkReachable = !!reachable;
   var loginOverlayVisible = document.getElementById('login-overlay').classList.contains('visible');
   if (loginOverlayVisible) {
     document.getElementById('btn-login-switch').style.display = window.__navlinkReachable ? '' : 'none';
+  }
+  // If reachability just became true and the user hasn't manually chosen an
+  // overlay yet (they're still sitting on the default key-entry screen we
+  // showed as a conservative fallback before the probe resolved), switch
+  // them to the credential-login screen now -- that's the screen
+  // showDefaultLoginScreen would have picked had the probe already resolved.
+  if (!wasReachable && window.__navlinkReachable && !window.__userNavigated && loginOverlayVisible) {
+    showOverlay('credential-login-overlay');
   }
 };
 
@@ -704,6 +790,7 @@ window.onCredentialError = function(msg) {
 };
 function saveSettings() {
   window.webkit.messageHandlers.sncSetSettings.postMessage({
+    wildcat:   document.getElementById('s-wildcat').checked,
     doh:       document.getElementById('s-doh').checked,
     blockQUIC: document.getElementById('s-block-quic').checked,
     region:    document.getElementById('s-region').value,
@@ -719,14 +806,17 @@ window.catAssets = {
   idle: 'sncasset://illustration_idle.png',
   connecting: 'sncasset://illustration_connecting.png',
   connected: 'sncasset://illustration_connected.png',
+  wildcat: 'sncasset://illustration_wildcat.png',
   error: 'sncasset://illustration_error.png',
   idle_catclub: 'sncasset://illustration_idle_catclub.png',
   connecting_catclub: 'sncasset://illustration_connecting_catclub.png',
   connected_catclub: 'sncasset://illustration_connected_catclub.png',
+  wildcat_catclub: 'sncasset://illustration_wildcat_catclub.png',
   error_catclub: 'sncasset://illustration_error_catclub.png',
   idle_elite: 'sncasset://illustration_idle_elite.png',
   connecting_elite: 'sncasset://illustration_connecting_elite.png',
   connected_elite: 'sncasset://illustration_connected_elite.png',
+  wildcat_elite: 'sncasset://illustration_wildcat_elite.png',
   error_elite: 'sncasset://illustration_error_elite.png',
 };
 window.clubTheme = '';
@@ -766,7 +856,7 @@ function submitRecommend() {
   var username = input.value.trim();
   if (!username) return;
   window.webkit.messageHandlers.sncRecommend.postMessage(username);
-  status.textContent = 'Recommendation sent for ' + username + '.';
+  status.textContent = I18N.recommendSentPrefix + username + I18N.recommendSentSuffix;
   input.value = '';
 }
 
@@ -775,8 +865,30 @@ function submitClubThemePreview() {
   window.webkit.messageHandlers.sncClubThemePreview.postMessage(theme);
 }
 
+// formatBytes renders a byte count like "1.2 MB" / "45.3 MB" -- one decimal
+// place above the B unit, matching the compact style used elsewhere in this
+// window (e.g. RTT figures). n is assumed non-negative (core.TotalBytes is a
+// monotonically increasing cumulative counter).
+function formatBytes(n) {
+  n = n || 0;
+  var units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  var i = 0;
+  while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+  return (i === 0 ? n.toFixed(0) : n.toFixed(1)) + ' ' + units[i];
+}
+// window.onBytesUpdate is pushed once a second by the daemon regardless of
+// connection state (see AppWindow.PushBytes) -- visibility is driven from
+// window.lastStatus.connected here rather than by the daemon withholding
+// pushes, so a counter arriving just as the state flips doesn't race the
+// status push that sets window.lastStatus.
+window.onBytesUpdate = function(b) {
+  var el = document.getElementById('byte-counter');
+  el.textContent = '↑ ' + formatBytes(b.sent) + '  ↓ ' + formatBytes(b.recv);
+  el.style.display = (window.lastStatus && window.lastStatus.connected) ? '' : 'none';
+};
 window.onStatusUpdate = function(s) {
   window.lastStatus = s;
+  document.getElementById('byte-counter').style.display = s.connected ? '' : 'none';
   if (!s.loggedIn) {
     // Only default to the "do you have a key?" prompt the first time we see
     // a logged-out status -- repeated status pushes (polling) must not reset
@@ -785,7 +897,7 @@ window.onStatusUpdate = function(s) {
     var anyVisible = ['have-key-overlay', 'credential-login-overlay', 'login-overlay']
       .some(function(o) { return document.getElementById(o).classList.contains('visible'); });
     if (!anyVisible) {
-      showOverlay('have-key-overlay');
+      showDefaultLoginScreen();
     }
     document.getElementById('btn-activate').disabled = false;
     return;
@@ -799,27 +911,28 @@ window.onStatusUpdate = function(s) {
   var bdis = document.getElementById('btn-disconnect');
   bar.className = '';
   if(s.error){
-    bar.classList.add('state-error');bar.textContent=s.errorMsg||'Error';
+    bar.classList.add('state-error');bar.textContent=s.errorMsg||I18N.errorDefault;
     bcon.style.display='';bdis.style.display='none';
     img.src=catAssetURL('error');return;
   }
   if(s.disconnecting){
-    bar.classList.add('state-connecting');bar.textContent='Disconnecting...';
+    bar.classList.add('state-connecting');bar.textContent=I18N.disconnecting;
     bcon.style.display='none';bdis.style.display='none';
     img.src=catAssetURL('connecting');return;
   }
   if(s.connecting){
-    bar.classList.add('state-connecting');bar.textContent='Connecting...';
+    bar.classList.add('state-connecting');bar.textContent=I18N.connecting;
     bcon.style.display='none';bdis.style.display='';
     img.src=catAssetURL('connecting');return;
   }
   if(s.connected){
-    bar.classList.add('state-connected');
-    bar.textContent='Connected';
+    var wc=s.mode==='wildcat';
+    bar.classList.add(wc?'state-wildcat':'state-connected');
+    bar.textContent=wc?I18N.connectedWildcat:I18N.connected;
     bcon.style.display='none';bdis.style.display='';
-    img.src=catAssetURL('connected');return;
+    img.src=catAssetURL(wc?'wildcat':'connected');return;
   }
-  bar.classList.add('state-disconnected');bar.textContent='Disconnected';
+  bar.classList.add('state-disconnected');bar.textContent=I18N.disconnected;
   bcon.style.display='';bdis.style.display='none';
   img.src=catAssetURL('idle');
 };
@@ -830,9 +943,14 @@ window.onLoginError = function(msg) {
   document.getElementById('btn-activate').disabled = false;
 };
 window.onSettingsUpdate = function(s) {
+  document.getElementById('s-wildcat').checked    = !!s.wildcat;
   document.getElementById('s-doh').checked        = !!s.doh;
   document.getElementById('s-block-quic').checked = !!s.blockQUIC;
   document.getElementById('s-region').value       = s.region||'';
+  // WildCat forces QUIC blocked for the session -- hide the row entirely
+  // rather than just greying it (checkbox state above is left untouched,
+  // so it reads correctly again the moment WildCat releases the lock).
+  document.getElementById('s-block-quic-row').style.display = s.quicLocked ? 'none' : '';
 };
 window.webkit.messageHandlers.sncPageReady.postMessage({});
 </script>

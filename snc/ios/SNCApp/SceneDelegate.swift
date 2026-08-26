@@ -15,8 +15,8 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         let conn    = UINavigationController(rootViewController: ConnectionViewController())
         let browser = BrowserViewController()
 
-        conn.tabBarItem    = UITabBarItem(title: "Connect", image: UIImage(systemName: "network"), tag: 0)
-        browser.tabBarItem = UITabBarItem(title: "Browse",  image: UIImage(systemName: "safari"),  tag: 1)
+        conn.tabBarItem    = UITabBarItem(title: L.t("tab.connect"), image: UIImage(systemName: "network"), tag: 0)
+        browser.tabBarItem = UITabBarItem(title: L.t("tab.browse"),  image: UIImage(systemName: "safari"),  tag: 1)
 
         let tab = UITabBarController()
         tab.viewControllers = [conn, browser]

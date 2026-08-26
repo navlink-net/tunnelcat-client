@@ -18,6 +18,7 @@ package windows
 import (
 	"bytes"
 	_ "embed"
+	"fmt"
 	"image"
 	"image/color"
 	"image/png"
@@ -33,7 +34,8 @@ import (
 	"golang.org/x/image/font/opentype"
 	"golang.org/x/image/math/fixed"
 
-	"tunnel_cat/snc/core"
+	"tunnel_cat/binlog"
+	"tunnel_cat/logevent"
 )
 
 //go:embed assets/logo.png
@@ -50,15 +52,21 @@ func ShowSplash(version string, duration time.Duration) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 
-	core.Log.Printf("splash: start version=%s", version)
+	logevent.Emit(binlog.TagSystem, logevent.EventWinSplash,
+		logevent.Str(logevent.AttrStage, "start"),
+		logevent.Str(logevent.AttrVersion, version))
 
 	// â”€â”€ 1. Decode and scale the logo â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 	src, err := png.Decode(bytes.NewReader(logoPNG))
 	if err != nil {
-		core.Log.Printf("splash: PNG decode failed: %v", err)
+		logevent.Emit(binlog.TagSystem, logevent.EventWinSplash,
+			logevent.Str(logevent.AttrStage, "decode_failed"),
+			logevent.Str(logevent.AttrDetail, err.Error()))
 		return
 	}
-	core.Log.Printf("splash: logo decoded %dx%d", src.Bounds().Dx(), src.Bounds().Dy())
+	logevent.Emit(binlog.TagSystem, logevent.EventWinSplash,
+		logevent.Str(logevent.AttrStage, "decoded"),
+		logevent.Str(logevent.AttrDetail, fmt.Sprintf("%dx%d", src.Bounds().Dx(), src.Bounds().Dy())))
 
 	const logoH = 360
 	sb := src.Bounds()
@@ -91,10 +99,14 @@ func ShowSplash(version string, duration time.Duration) {
 		uintptr(unsafe.Pointer(&dibBits)),
 		0, 0)
 	if hbm == 0 {
-		core.Log.Printf("splash: CreateDIBSection failed (canvas %dx%d)", canvasW, canvasH)
+		logevent.Emit(binlog.TagSystem, logevent.EventWinSplash,
+			logevent.Str(logevent.AttrStage, "dib_failed"),
+			logevent.Str(logevent.AttrDetail, fmt.Sprintf("%dx%d", canvasW, canvasH)))
 		return
 	}
-	core.Log.Printf("splash: DIB created %dx%d", canvasW, canvasH)
+	logevent.Emit(binlog.TagSystem, logevent.EventWinSplash,
+		logevent.Str(logevent.AttrStage, "dib_created"),
+		logevent.Str(logevent.AttrDetail, fmt.Sprintf("%dx%d", canvasW, canvasH)))
 	oldBM, _, _ := splashGdi32.NewProc("SelectObject").Call(memDC, hbm)
 	defer func() {
 		splashGdi32.NewProc("SelectObject").Call(memDC, oldBM)
@@ -129,11 +141,13 @@ func ShowSplash(version string, duration time.Duration) {
 	// â”€â”€ 4. Create WS_EX_LAYERED window (hidden) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 	hwnd := splashCreateLayeredWindow(canvasW, canvasH)
 	if hwnd == 0 {
-		core.Log.Printf("splash: CreateWindowExW failed")
+		logevent.Emit(binlog.TagSystem, logevent.EventWinSplash, logevent.Str(logevent.AttrStage, "window_failed"))
 		return
 	}
 	defer splashUser32.NewProc("DestroyWindow").Call(hwnd)
-	core.Log.Printf("splash: window created hwnd=%x", hwnd)
+	logevent.Emit(binlog.TagSystem, logevent.EventWinSplash,
+		logevent.Str(logevent.AttrStage, "window_created"),
+		logevent.Str(logevent.AttrDetail, fmt.Sprintf("hwnd=%x", hwnd)))
 
 	// â”€â”€ 5. UpdateLayeredWindow: set content and position â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 	sw, _, _ := splashUser32.NewProc("GetSystemMetrics").Call(0) // SM_CXSCREEN
@@ -159,41 +173,46 @@ func ShowSplash(version string, duration time.Duration) {
 		uintptr(unsafe.Pointer(&blend[0])),
 		2) // ULW_ALPHA
 	splashUser32.NewProc("ReleaseDC").Call(0, hdcScreen)
-	core.Log.Printf("splash: UpdateLayeredWindow ret=%d err=%v pos=(%d,%d) size=%dx%d",
-		ret, errWin, x, y, canvasW, canvasH)
+	logevent.Emit(binlog.TagSystem, logevent.EventWinSplash,
+		logevent.Str(logevent.AttrStage, "update_layered"),
+		logevent.Str(logevent.AttrDetail, fmt.Sprintf("ret=%d err=%v pos=(%d,%d) size=%dx%d", ret, errWin, x, y, canvasW, canvasH)))
 
 	// Show the window â€” content is already set by UpdateLayeredWindow.
 	splashUser32.NewProc("ShowWindow").Call(hwnd, 5) // SW_SHOW
 	splashUser32.NewProc("SetForegroundWindow").Call(hwnd)
-	core.Log.Printf("splash: shown, entering message loop")
+	logevent.Emit(binlog.TagSystem, logevent.EventWinSplash, logevent.Str(logevent.AttrStage, "shown"))
 
 	// â”€â”€ 6. Message loop â€” exit on timer or left-click â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 	timerID, _, _ := splashUser32.NewProc("SetTimer").Call(hwnd, 1, uintptr(duration.Milliseconds()), 0)
-	core.Log.Printf("splash: timer set id=%d ms=%d", timerID, duration.Milliseconds())
+	logevent.Emit(binlog.TagSystem, logevent.EventWinSplash,
+		logevent.Str(logevent.AttrStage, "timer_set"),
+		logevent.Str(logevent.AttrDetail, fmt.Sprintf("id=%d ms=%d", timerID, duration.Milliseconds())))
 
 	var msg [7]uintptr
 	for {
 		r, _, _ := splashUser32.NewProc("GetMessageW").Call(
 			uintptr(unsafe.Pointer(&msg[0])), 0, 0, 0)
 		if r == 0 || r == ^uintptr(0) {
-			core.Log.Printf("splash: GetMessageW=%d (WM_QUIT or error)", r)
+			logevent.Emit(binlog.TagSystem, logevent.EventWinSplash,
+				logevent.Str(logevent.AttrStage, "quit"),
+				logevent.Str(logevent.AttrDetail, fmt.Sprintf("GetMessageW=%d", r)))
 			break
 		}
 		msgID := uint32(msg[1])
 		// Only dismiss on OUR timer (hwnd + timer ID 1), not any WM_TIMER on
 		// this thread (other windows may share the message queue).
 		if msgID == 0x0113 && msg[0] == hwnd && msg[2] == 1 { // WM_TIMER, ours
-			core.Log.Printf("splash: dismissed by WM_TIMER")
+			logevent.Emit(binlog.TagSystem, logevent.EventWinSplash, logevent.Str(logevent.AttrStage, "dismissed_timer"))
 			break
 		}
 		if msgID == 0x0201 { // WM_LBUTTONDOWN
-			core.Log.Printf("splash: dismissed by click")
+			logevent.Emit(binlog.TagSystem, logevent.EventWinSplash, logevent.Str(logevent.AttrStage, "dismissed_click"))
 			break
 		}
 		splashUser32.NewProc("TranslateMessage").Call(uintptr(unsafe.Pointer(&msg[0])))
 		splashUser32.NewProc("DispatchMessageW").Call(uintptr(unsafe.Pointer(&msg[0])))
 	}
-	core.Log.Printf("splash: done")
+	logevent.Emit(binlog.TagSystem, logevent.EventWinSplash, logevent.Str(logevent.AttrStage, "done"))
 
 	// Drain any stray WM_QUIT before returning so the next message loop
 	// (tray, key dialog) is not poisoned.
@@ -256,12 +275,16 @@ func splashGetModuleHandle() uintptr {
 func drawSplashText(img *image.NRGBA, version string) {
 	boldTTF, err := opentype.Parse(gobold.TTF)
 	if err != nil {
-		core.Log.Printf("splash: parse bold font: %v", err)
+		logevent.Emit(binlog.TagSystem, logevent.EventWinSplash,
+			logevent.Str(logevent.AttrStage, "font_bold_failed"),
+			logevent.Str(logevent.AttrDetail, err.Error()))
 		return
 	}
 	regularTTF, err := opentype.Parse(goregular.TTF)
 	if err != nil {
-		core.Log.Printf("splash: parse regular font: %v", err)
+		logevent.Emit(binlog.TagSystem, logevent.EventWinSplash,
+			logevent.Str(logevent.AttrStage, "font_regular_failed"),
+			logevent.Str(logevent.AttrDetail, err.Error()))
 		return
 	}
 
@@ -271,7 +294,9 @@ func drawSplashText(img *image.NRGBA, version string) {
 		Hinting: font.HintingFull,
 	})
 	if err != nil {
-		core.Log.Printf("splash: title face: %v", err)
+		logevent.Emit(binlog.TagSystem, logevent.EventWinSplash,
+			logevent.Str(logevent.AttrStage, "title_face_failed"),
+			logevent.Str(logevent.AttrDetail, err.Error()))
 		return
 	}
 	defer titleFace.Close()
@@ -282,7 +307,9 @@ func drawSplashText(img *image.NRGBA, version string) {
 		Hinting: font.HintingFull,
 	})
 	if err != nil {
-		core.Log.Printf("splash: version face: %v", err)
+		logevent.Emit(binlog.TagSystem, logevent.EventWinSplash,
+			logevent.Str(logevent.AttrStage, "version_face_failed"),
+			logevent.Str(logevent.AttrDetail, err.Error()))
 		return
 	}
 	defer verFace.Close()

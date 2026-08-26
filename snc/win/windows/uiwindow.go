@@ -10,6 +10,7 @@ import (
 	_ "embed"
 
 	"bytes"
+	"fmt"
 	"image/png"
 	"runtime"
 	"runtime/debug"
@@ -17,7 +18,8 @@ import (
 	"unsafe"
 
 	"golang.org/x/sys/windows"
-	"tunnel_cat/snc/core"
+	"tunnel_cat/binlog"
+	"tunnel_cat/logevent"
 )
 
 // Main-screen illustration -- deliberately a SEPARATE file from
@@ -35,7 +37,10 @@ var catConnectingPNG []byte
 //go:embed assets/illustration_connected.png
 var catConnectedPNG []byte
 
-// Club-theme variants of the same three illustrations -- same layout/content
+//go:embed assets/illustration_wildcat.png
+var catWildcatPNG []byte
+
+// Club-theme variants of the same four illustrations -- same layout/content
 // as the default set above, only the color palette and artwork differ (see
 // AppWindow.ClubTheme). No "error" variants: this client has no error
 // illustration slot at all yet (see catEntry usage in initGDI), so there's
@@ -50,6 +55,9 @@ var catConnectingPNGCatClub []byte
 //go:embed assets/illustration_connected_catclub.png
 var catConnectedPNGCatClub []byte
 
+//go:embed assets/illustration_wildcat_catclub.png
+var catWildcatPNGCatClub []byte
+
 //go:embed assets/illustration_idle_elite.png
 var catIdlePNGElite []byte
 
@@ -58,6 +66,9 @@ var catConnectingPNGElite []byte
 
 //go:embed assets/illustration_connected_elite.png
 var catConnectedPNGElite []byte
+
+//go:embed assets/illustration_wildcat_elite.png
+var catWildcatPNGElite []byte
 
 // â”€â”€ Layout â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
@@ -118,6 +129,7 @@ const (
 	uiBSOWNERDRAW     = 0x0000000B
 	uiCBSDROPDOWNLIST = 0x00000003
 	uiCBSHASSTRINGS   = 0x00000200
+	uiSSRIGHT         = 0x00000002 // SS_RIGHT -- right-aligned STATIC text
 
 	uiODS_SELECTED = 0x0001
 	uiODS_FOCUS    = 0x0010
@@ -178,6 +190,7 @@ const (
 	uiWM_ReloadClubTheme = uiWM_APP + 2
 	uiWM_SetAdminAccount = uiWM_APP + 3
 	uiWM_SetCanRecommend = uiWM_APP + 4
+	uiWM_UpdateBytes     = uiWM_APP + 5
 	uiWM_QUIT            = 0x0012
 
 	uiHTCAPTION  = 2
@@ -190,11 +203,13 @@ const (
 	uiDWMWA_DARK = 20
 
 	// Control IDs
-	uiIDConnect    = 101
-	uiIDDisconnect = 102
-	uiIDDoH        = 104
-	uiIDRegion     = 107
-	uiIDBlockQUIC  = 108
+	uiIDConnect     = 101
+	uiIDDisconnect  = 102
+	uiIDDoH         = 104
+	uiIDRegion      = 107
+	uiIDBlockQUIC   = 108
+	uiIDWildCat     = 109
+	uiIDByteCounter = 110
 
 	// Native menu-bar item IDs (separate range from control IDs above so
 	// WM_COMMAND dispatch never collides between a button/checkbox and a
@@ -205,6 +220,7 @@ const (
 	uiIDMenuDisconnect   = 303
 	uiIDMenuDoH          = 304
 	uiIDMenuBlockQUIC    = 305
+	uiIDMenuWildcat      = 306
 	uiIDMenuRegionAuto   = 307
 	uiIDMenuRegionRussia = 308
 	uiIDMenuRegionEurope = 309
@@ -385,6 +401,7 @@ type AppWindow struct {
 	catIdleDC, catIdleBM       uintptr
 	catConnectingDC, catConnBM uintptr
 	catConnectedDC, catConBM   uintptr
+	catWildcatDC, catWildcatBM uintptr
 
 	// Full-window-sized (uiWÃ—uiH) versions of the same illustrations, stretched
 	// to fill the whole content area as the background instead of bg.png --
@@ -393,6 +410,7 @@ type AppWindow struct {
 	catIdleBgDC, catIdleBgBM             uintptr
 	catConnectingBgDC, catConnectingBgBM uintptr
 	catConnectedBgDC, catConnectedBgBM   uintptr
+	catWildcatBgDC, catWildcatBgBM       uintptr
 
 	// Window HICON â€” tracked so the previous handle is destroyed before replacement
 	// (CreateIconFromResourceEx leaks one handle per call otherwise).
@@ -404,16 +422,19 @@ type AppWindow struct {
 	hRegion     uintptr // region combobox
 	hDoH        uintptr // native checkboxes on Settings tab
 	hBlockQUIC  uintptr
+	hWildCat    uintptr
+	hBytesLabel uintptr // uplink/downlink counter, above the tunnel status bar; see UpdateBytes
 
 	// State â€” updated from any goroutine, read in WndProc (always on runLoop thread)
-	mu                  sync.Mutex
-	status              AppStatus
-	settings            AppSettings
-	pendingClubTheme    string // stashed by ReloadClubTheme, applied on the runLoop thread by uiWM_ReloadClubTheme
-	pendingBadgeText    string // stashed alongside pendingClubTheme; "" = no badge (regular tier)
-	clubBadgeText       string // currently-displayed badge text, set by applyClubTheme on the runLoop thread
-	pendingIsAdmin      bool   // stashed by SetAdminAccount, applied on the runLoop thread by uiWM_SetAdminAccount
-	pendingCanRecommend bool   // stashed by SetCanRecommend, applied on the runLoop thread by uiWM_SetCanRecommend
+	mu                   sync.Mutex
+	status               AppStatus
+	settings             AppSettings
+	bytesSent, bytesRecv int64  // stashed by UpdateBytes, applied on the runLoop thread by uiWM_UpdateBytes
+	pendingClubTheme     string // stashed by ReloadClubTheme, applied on the runLoop thread by uiWM_ReloadClubTheme
+	pendingBadgeText     string // stashed alongside pendingClubTheme; "" = no badge (regular tier)
+	clubBadgeText        string // currently-displayed badge text, set by applyClubTheme on the runLoop thread
+	pendingIsAdmin       bool   // stashed by SetAdminAccount, applied on the runLoop thread by uiWM_SetAdminAccount
+	pendingCanRecommend  bool   // stashed by SetCanRecommend, applied on the runLoop thread by uiWM_SetCanRecommend
 
 	// Callbacks â€” set before Start()
 	ConnectFn     func()
@@ -447,7 +468,9 @@ var (
 func uiWndProc(hwnd, msg, wp, lp uintptr) uintptr {
 	defer func() {
 		if r := recover(); r != nil {
-			core.Log.Printf("uiwindow: WndProc PANIC msg=0x%x: %v\n%s", msg, r, debug.Stack())
+			logevent.Emit(binlog.TagSystem, logevent.EventWinUiwindowLifecycle,
+				logevent.Str(logevent.AttrStage, "panic"),
+				logevent.Str(logevent.AttrDetail, fmt.Sprintf("msg=0x%x: %v\n%s", msg, r, debug.Stack())))
 		}
 	}()
 	aw := globalAW
@@ -487,6 +510,16 @@ func (aw *AppWindow) handleMsg(msg, wp, lp uintptr) uintptr {
 		return 1
 
 	case uiWM_CTLCOLORBTN, uiWM_CTLCOLORSTATIC:
+		if lp == aw.hBytesLabel {
+			// Byte counter: no background box at all -- just white text
+			// directly over the illustration/status-bar area, per explicit
+			// "make the little plate transparent" request. NULL_BRUSH (stock
+			// object 5) tells Windows not to paint anything behind the text.
+			uiSetBkModeFn.Call(wp, uiTRANSPARENT)
+			uiSetTextColorFn.Call(wp, 0x00FFFFFF)
+			nullBrush, _, _ := uiGetStockObjectFn.Call(5) // NULL_BRUSH
+			return nullBrush
+		}
 		if aw.activeTab == 1 {
 			uiSetBkModeFn.Call(wp, uiTRANSPARENT)
 			uiSetTextColorFn.Call(wp, 0x00FFFFFF)
@@ -518,10 +551,30 @@ func (aw *AppWindow) handleMsg(msg, wp, lp uintptr) uintptr {
 		aw.mu.Lock()
 		s := aw.status
 		aw.mu.Unlock()
-		core.Log.Printf("uiwindow: WM_UpdateStatus connected=%v connecting=%v disconnecting=%v mode=%q tab=%d", s.Connected, s.Connecting, s.Disconnecting, s.Mode, aw.activeTab)
+		logevent.Emit(binlog.TagSystem, logevent.EventWinUiwindowLifecycle,
+			logevent.Str(logevent.AttrStage, "status"),
+			logevent.Str(logevent.AttrDetail, fmt.Sprintf("connected=%v connecting=%v disconnecting=%v mode=%q tab=%d", s.Connected, s.Connecting, s.Disconnecting, s.Mode, aw.activeTab)))
 		aw.syncConnectButtons()
 		aw.syncWindowIcon()
+		aw.syncBlockQUICLock(s.QUICLocked)
+		aw.syncByteCounterVisibility(s.Connected)
 		uiInvalidateRectFn.Call(aw.hwnd, 0, 0) // bErase=FALSE â€” WM_PAINT double-buffers everything
+		return 0
+
+	case uiWM_UpdateBytes:
+		// Cheap path: only re-sets one STATIC control's text via WM_SETTEXT,
+		// no InvalidateRect/full repaint -- this fires about once/second
+		// while connected (see TrayApp's tick in tray.go), same reasoning as
+		// why tickElapsed only updates the tray tooltip instead of calling
+		// UpdateStatus every second.
+		aw.mu.Lock()
+		sent, recv := aw.bytesSent, aw.bytesRecv
+		aw.mu.Unlock()
+		if aw.hBytesLabel != 0 {
+			text := fmt.Sprintf("↑ %s   ↓ %s", formatByteCount(sent), formatByteCount(recv))
+			p, _ := windows.UTF16PtrFromString(text)
+			uiSendMessageFn.Call(aw.hBytesLabel, 0x000C /*WM_SETTEXT*/, 0, uintptr(unsafe.Pointer(p)))
+		}
 		return 0
 
 	case uiWM_ReloadClubTheme:
@@ -629,7 +682,9 @@ func (aw *AppWindow) paintBackground(hdc uintptr) {
 	s := aw.status
 	aw.mu.Unlock()
 	bgDC := aw.catIdleBgDC
-	if s.Connected {
+	if s.Connected && s.Mode == "wildcat" {
+		bgDC = aw.catWildcatBgDC
+	} else if s.Connected {
 		bgDC = aw.catConnectedBgDC
 	} else if s.Connecting || s.Disconnecting {
 		bgDC = aw.catConnectingBgDC
@@ -681,7 +736,7 @@ func (aw *AppWindow) paintContent(hdc uintptr) {
 	// â”€â”€ Tab bar â”€â”€
 	tabBarRC := uiRECT{0, uiHdrH, uiW, uiHdrH + uiTabH}
 	uiFillRectFn.Call(hdc, uintptr(unsafe.Pointer(&tabBarRC)), aw.hbrTab)
-	tabs := []string{"TUNNEL", "SETTINGS"}
+	tabs := []string{T("tab_tunnel"), T("tab_settings")}
 	tabW := int32(uiW / len(tabs))
 	uiSelectObjectFn.Call(hdc, aw.hfBadge)
 	for i, label := range tabs {
@@ -747,11 +802,11 @@ func (aw *AppWindow) paintSettings(hdc uintptr) {
 	const s0 = uiContY + 12 // "YOUR LOCATION" header
 	const s1 = uiContY + 94 // "CONNECTION OPTIONS" header
 
-	paintSectionHdr("YOUR LOCATION", s0)
-	paintSubLabel("Your location (where you are):", s0+20)
+	paintSectionHdr(T("section_your_location"), s0)
+	paintSubLabel(T("label_your_location"), s0+20)
 	// combobox is a native control at y = uiContY+58 â€” painted by Windows
 
-	paintSectionHdr("CONNECTION OPTIONS", s1)
+	paintSectionHdr(T("section_connection_options"), s1)
 	// Native checkbox (hDoH) is rendered by Windows.
 }
 
@@ -762,6 +817,7 @@ const (
 	statusBarGray   uint32 = 120 | (120 << 8) | (120 << 16) // disconnected
 	statusBarOrange uint32 = 230 | (140 << 8) | (20 << 16)  // connecting/disconnecting
 	statusBarRed    uint32 = 200 | (40 << 8) | (40 << 16)   // error
+	statusBarBlack  uint32 = 12 | (12 << 8) | (12 << 16)    // wildcat
 )
 
 func (aw *AppWindow) paintTunnel(hdc uintptr) {
@@ -799,23 +855,26 @@ func (aw *AppWindow) paintTunnel(hdc uintptr) {
 	// A full-width colored status bar at the very bottom of the window
 	// replaces the old floating text strip (same feedback round, "оформим
 	// покрасивее" -- shevron-style bar, white text, one color per state).
-	statusText := "Disconnected"
+	statusText := T("status_disconnected")
 	barColor := statusBarGray
 	switch {
 	case s.Error:
-		statusText = "Error"
+		statusText = T("status_error")
 		if s.ErrorMsg != "" {
 			statusText = s.ErrorMsg
 		}
 		barColor = statusBarRed
+	case s.Connected && s.Mode == "wildcat":
+		statusText = T("status_connected_wildcat")
+		barColor = statusBarBlack
 	case s.Connected:
-		statusText = "Connected"
+		statusText = T("status_connected")
 		barColor = statusBarGreen
 	case s.Connecting:
-		statusText = "Connecting..."
+		statusText = T("status_connecting")
 		barColor = statusBarOrange
 	case s.Disconnecting:
-		statusText = "Disconnecting..."
+		statusText = T("status_disconnecting")
 		barColor = statusBarOrange
 	}
 
@@ -855,9 +914,9 @@ func (aw *AppWindow) handleDrawItem(lp uintptr) {
 	var label string
 	switch di.CtlID {
 	case uiIDConnect:
-		label = "CONNECT"
+		label = T("button_connect")
 	case uiIDDisconnect:
-		label = "DISCONNECT"
+		label = T("button_disconnect")
 	default:
 		return
 	}
@@ -944,52 +1003,57 @@ func (aw *AppWindow) handleCommand(id, notif uint16) {
 	switch id {
 	case uiIDConnect:
 		if notif == uiBN_CLICKED && aw.ConnectFn != nil {
-			core.Log.Printf("uiwindow: user clicked Connect button")
+			logevent.Emit(binlog.TagSystem, logevent.EventWinUiwindowMenu, logevent.Str(logevent.AttrAction, "connect"))
 			go aw.ConnectFn()
 		}
 	case uiIDDisconnect:
 		if notif == uiBN_CLICKED && aw.DisconnectFn != nil {
-			core.Log.Printf("uiwindow: user clicked Disconnect button")
+			logevent.Emit(binlog.TagSystem, logevent.EventWinUiwindowMenu, logevent.Str(logevent.AttrAction, "disconnect"))
 			go aw.DisconnectFn()
 		}
-	case uiIDDoH, uiIDBlockQUIC:
+	case uiIDDoH, uiIDBlockQUIC, uiIDWildCat:
 		if notif == uiBN_CLICKED {
-			core.Log.Printf("uiwindow: user toggled settings checkbox id=%d", id)
+			logevent.Emit(binlog.TagSystem, logevent.EventWinUiwindowMenu,
+				logevent.Str(logevent.AttrAction, "checkbox_toggle"),
+				logevent.Str(logevent.AttrDetail, fmt.Sprintf("id=%d", id)))
 			go aw.saveSettings()
 		}
 	case uiIDRegion:
 		if notif == uiCBN_SELCHANGE {
-			core.Log.Printf("uiwindow: user changed region combobox")
+			logevent.Emit(binlog.TagSystem, logevent.EventWinUiwindowMenu, logevent.Str(logevent.AttrAction, "region_combo"))
 			aw.saveSettings()
 		}
 
 	// â”€â”€ Native menu bar â”€â”€ mirrors the tray's right-click menu item-for-item.
 	case uiIDMenuLogin:
-		core.Log.Printf("uiwindow: menu: Login")
+		logevent.Emit(binlog.TagSystem, logevent.EventWinUiwindowMenu, logevent.Str(logevent.AttrAction, "login"))
 		if aw.LoginFn != nil {
 			go aw.LoginFn()
 		}
 	case uiIDMenuLogout:
-		core.Log.Printf("uiwindow: menu: Logout")
+		logevent.Emit(binlog.TagSystem, logevent.EventWinUiwindowMenu, logevent.Str(logevent.AttrAction, "logout"))
 		if aw.LogoutFn != nil {
 			go aw.LogoutFn()
 		}
 	case uiIDMenuConnect:
-		core.Log.Printf("uiwindow: menu: Connect")
+		logevent.Emit(binlog.TagSystem, logevent.EventWinUiwindowMenu, logevent.Str(logevent.AttrAction, "connect_menu"))
 		if aw.ConnectFn != nil {
 			go aw.ConnectFn()
 		}
 	case uiIDMenuDisconnect:
-		core.Log.Printf("uiwindow: menu: Disconnect")
+		logevent.Emit(binlog.TagSystem, logevent.EventWinUiwindowMenu, logevent.Str(logevent.AttrAction, "disconnect_menu"))
 		if aw.DisconnectFn != nil {
 			go aw.DisconnectFn()
 		}
 	case uiIDMenuDoH:
-		core.Log.Printf("uiwindow: menu: toggle DoH")
+		logevent.Emit(binlog.TagSystem, logevent.EventWinUiwindowMenu, logevent.Str(logevent.AttrAction, "doh_toggle"))
 		aw.toggleMenuSetting(func(s *AppSettings) { s.DoH = !s.DoH })
 	case uiIDMenuBlockQUIC:
-		core.Log.Printf("uiwindow: menu: toggle Disable QUIC")
+		logevent.Emit(binlog.TagSystem, logevent.EventWinUiwindowMenu, logevent.Str(logevent.AttrAction, "quic_toggle"))
 		aw.toggleMenuSetting(func(s *AppSettings) { s.BlockQUIC = !s.BlockQUIC })
+	case uiIDMenuWildcat:
+		logevent.Emit(binlog.TagSystem, logevent.EventWinUiwindowMenu, logevent.Str(logevent.AttrAction, "wildcat_toggle"))
+		aw.toggleMenuSetting(func(s *AppSettings) { s.WildCat = !s.WildCat })
 	case uiIDMenuRegionAuto:
 		aw.setMenuRegion("")
 	case uiIDMenuRegionRussia:
@@ -1007,9 +1071,9 @@ func (aw *AppWindow) handleCommand(id, notif uint16) {
 	case uiIDMenuPreviewCatClub:
 		// No distinguishing marker text: the preview must look exactly like
 		// what a real member sees, same as every other client.
-		aw.ReloadClubTheme("catclub", "Cat Club Member")
+		aw.ReloadClubTheme("catclub", T("badge_cat_club_member"))
 	case uiIDMenuPreviewElite:
-		aw.ReloadClubTheme("elite", "Elite Cat Club Member")
+		aw.ReloadClubTheme("elite", T("badge_elite_cat_club_member"))
 	case uiIDMenuRecommend:
 		// ShowRecommendDialog is a nested modal message loop (same pattern
 		// Win32's own MessageBox uses) -- safe to call synchronously from
@@ -1020,7 +1084,7 @@ func (aw *AppWindow) handleCommand(id, notif uint16) {
 			go aw.RecommendFn(username)
 		}
 	case uiIDMenuAbout:
-		core.Log.Printf("uiwindow: menu: About")
+		logevent.Emit(binlog.TagSystem, logevent.EventWinUiwindowMenu, logevent.Str(logevent.AttrAction, "about"))
 		// go, not a direct call -- audit finding, 2026-08-10: every other
 		// Fn callback invoked from WM_COMMAND (the UI thread) was already
 		// either channel-dispatched (TriggerLogin/TriggerConnect/... are
@@ -1034,7 +1098,7 @@ func (aw *AppWindow) handleCommand(id, notif uint16) {
 			go aw.AboutFn()
 		}
 	case uiIDMenuUpdate:
-		core.Log.Printf("uiwindow: menu: Update")
+		logevent.Emit(binlog.TagSystem, logevent.EventWinUiwindowMenu, logevent.Str(logevent.AttrAction, "update"))
 		// UpdateFn -> core.ApplyPendingUpdate(), real file I/O (staging/
 		// replacing the installed binary) -- must never run on the UI
 		// thread, see the case above.
@@ -1042,7 +1106,7 @@ func (aw *AppWindow) handleCommand(id, notif uint16) {
 			go aw.UpdateFn()
 		}
 	case uiIDMenuQuit:
-		core.Log.Printf("uiwindow: menu: Quit")
+		logevent.Emit(binlog.TagSystem, logevent.EventWinUiwindowMenu, logevent.Str(logevent.AttrAction, "quit"))
 		// QuitFn -> TriggerQuit(), already a non-blocking channel send, but
 		// go here too for the same reason as AboutFn: this call site should
 		// never itself become a reason a future change to QuitFn blocks the
@@ -1061,6 +1125,7 @@ func (aw *AppWindow) saveSettings() {
 		DoH:       checkboxChecked(aw.hDoH),
 		BlockQUIC: checkboxChecked(aw.hBlockQUIC),
 		Region:    regionFromIndex(comboGetSel(aw.hRegion)),
+		WildCat:   checkboxChecked(aw.hWildCat),
 	})
 	// Re-read canonical settings (tray may have applied mutual exclusion)
 	// and mirror back to controls.
@@ -1076,6 +1141,8 @@ func (aw *AppWindow) syncWindowIcon() {
 	var ico []byte
 	var icoName string
 	switch {
+	case s.Connected && s.Mode == "wildcat":
+		ico, icoName = icoWildcat, "wildcat"
 	case s.Connected:
 		ico, icoName = icoConnected, "connected"
 	case s.Disconnecting, s.Connecting:
@@ -1083,7 +1150,9 @@ func (aw *AppWindow) syncWindowIcon() {
 	default:
 		ico, icoName = icoIdle, "idle"
 	}
-	core.Log.Printf("uiwindow: syncWindowIcon â†’ %s (connected=%v connecting=%v disconnecting=%v)", icoName, s.Connected, s.Connecting, s.Disconnecting)
+	logevent.Emit(binlog.TagSystem, logevent.EventWinUiwindowLifecycle,
+		logevent.Str(logevent.AttrStage, "status"),
+		logevent.Str(logevent.AttrDetail, fmt.Sprintf("syncWindowIcon -> %s (connected=%v connecting=%v disconnecting=%v)", icoName, s.Connected, s.Connecting, s.Disconnecting)))
 	newIcon := setWindowIconFromICO(aw.hwnd, ico)
 	if aw.hIcon != 0 {
 		winDestroyIconFn.Call(aw.hIcon)
@@ -1129,6 +1198,7 @@ func (aw *AppWindow) syncTabControls() {
 	showIf(aw.hRegion, settings)
 	showIf(aw.hDoH, settings)
 	showIf(aw.hBlockQUIC, settings)
+	showIf(aw.hWildCat, settings)
 	if tunnel {
 		aw.syncConnectButtons()
 	}
@@ -1143,14 +1213,16 @@ func NewAppWindow() *AppWindow {
 
 // Start spins up the native Win32 window on a dedicated OS-locked goroutine.
 func (aw *AppWindow) Start() {
-	core.Log.Printf("uiwindow: Start()")
+	logevent.Emit(binlog.TagSystem, logevent.EventWinUiwindowLifecycle, logevent.Str(logevent.AttrStage, "start"))
 	aw.startOnce.Do(func() { go aw.runLoop() })
 }
 
 func (aw *AppWindow) runLoop() {
 	defer func() {
 		if r := recover(); r != nil {
-			core.Log.Printf("uiwindow: runLoop PANIC: %v\n%s", r, debug.Stack())
+			logevent.Emit(binlog.TagSystem, logevent.EventWinUiwindowLifecycle,
+				logevent.Str(logevent.AttrStage, "run_panic"),
+				logevent.Str(logevent.AttrDetail, fmt.Sprintf("%v\n%s", r, debug.Stack())))
 			close(aw.readyCh)
 		}
 	}()
@@ -1177,7 +1249,9 @@ func (aw *AppWindow) runLoop() {
 			1, 0x00030000, 32, 32, 0,
 		)
 	}
-	core.Log.Printf("uiwindow: class hIcon=0x%x", classHIcon)
+	logevent.Emit(binlog.TagSystem, logevent.EventWinUiwindowLifecycle,
+		logevent.Str(logevent.AttrStage, "class_icon"),
+		logevent.Str(logevent.AttrDetail, fmt.Sprintf("hIcon=0x%x", classHIcon)))
 
 	wc := uiWNDCLASSEX{
 		CbSize:        uint32(unsafe.Sizeof(uiWNDCLASSEX{})),
@@ -1205,7 +1279,7 @@ func (aw *AppWindow) runLoop() {
 	x := (int32(sw) - uiW) / 2
 	y := (int32(sh) - totalH) / 2
 
-	winName, _ := windows.UTF16PtrFromString("ShortNerdCat")
+	winName, _ := windows.UTF16PtrFromString(T("app_title"))
 	hwnd, _, _ := uiCreateWindowExW.Call(
 		uiWS_EX_APPWINDOW,
 		uintptr(unsafe.Pointer(className)),
@@ -1214,12 +1288,14 @@ func (aw *AppWindow) runLoop() {
 		uintptr(x), uintptr(y), uiW, uintptr(totalH),
 		0, hMenuBar, hInst, 0)
 	if hwnd == 0 {
-		core.Log.Printf("uiwindow: CreateWindowExW failed")
+		logevent.Emit(binlog.TagSystem, logevent.EventWinUiwindowLifecycle, logevent.Str(logevent.AttrStage, "window_failed"))
 		close(aw.readyCh)
 		return
 	}
 	aw.hwnd = hwnd
-	core.Log.Printf("uiwindow: hwnd=0x%x", hwnd)
+	logevent.Emit(binlog.TagSystem, logevent.EventWinUiwindowLifecycle,
+		logevent.Str(logevent.AttrStage, "hwnd_created"),
+		logevent.Str(logevent.AttrDetail, fmt.Sprintf("0x%x", hwnd)))
 
 	// Dark title bar via DWM.
 	darkMode := uint32(1)
@@ -1227,7 +1303,9 @@ func (aw *AppWindow) runLoop() {
 
 	// Belt-and-suspenders: send WM_SETICON too (class icon covers the taskbar,
 	// this covers the window caption icon and ALT+TAB).
-	core.Log.Printf("uiwindow: setting initial idle icon, icoIdle len=%d", len(icoIdle))
+	logevent.Emit(binlog.TagSystem, logevent.EventWinUiwindowLifecycle,
+		logevent.Str(logevent.AttrStage, "initial_icon"),
+		logevent.Str(logevent.AttrDetail, fmt.Sprintf("len=%d", len(icoIdle))))
 	aw.hIcon = setWindowIconFromICO(hwnd, icoIdle)
 
 	// Build GDI resources.
@@ -1248,7 +1326,7 @@ func (aw *AppWindow) runLoop() {
 	aw.syncTabControls()
 
 	close(aw.readyCh)
-	core.Log.Printf("uiwindow: ready")
+	logevent.Emit(binlog.TagSystem, logevent.EventWinUiwindowLifecycle, logevent.Str(logevent.AttrStage, "ready"))
 	// Sync status immediately â€” callStatusChange may have fired before readyCh was closed.
 	if aw.StatusFn != nil {
 		aw.UpdateStatus(aw.StatusFn())
@@ -1272,21 +1350,21 @@ func (aw *AppWindow) runLoop() {
 		uiTranslateMessageFn.Call(uintptr(unsafe.Pointer(&m)))
 		uiDispatchMessageFn.Call(uintptr(unsafe.Pointer(&m)))
 	}
-	core.Log.Printf("uiwindow: message loop exited")
+	logevent.Emit(binlog.TagSystem, logevent.EventWinUiwindowLifecycle, logevent.Str(logevent.AttrStage, "message_loop_exited"))
 }
 
 // â”€â”€ GDI init / cleanup â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 // themedCatPNGs picks the illustration byte-slice set matching aw.ClubTheme,
 // falling back to the default set for an unrecognized value.
-func (aw *AppWindow) themedCatPNGs() (idle, connecting, connected []byte) {
+func (aw *AppWindow) themedCatPNGs() (idle, connecting, connected, wildcat []byte) {
 	switch aw.ClubTheme {
 	case "catclub":
-		return catIdlePNGCatClub, catConnectingPNGCatClub, catConnectedPNGCatClub
+		return catIdlePNGCatClub, catConnectingPNGCatClub, catConnectedPNGCatClub, catWildcatPNGCatClub
 	case "elite":
-		return catIdlePNGElite, catConnectingPNGElite, catConnectedPNGElite
+		return catIdlePNGElite, catConnectingPNGElite, catConnectedPNGElite, catWildcatPNGElite
 	default:
-		return catIdlePNG, catConnectingPNG, catConnectedPNG
+		return catIdlePNG, catConnectingPNG, catConnectedPNG, catWildcatPNG
 	}
 }
 
@@ -1321,7 +1399,9 @@ func (aw *AppWindow) initGDI() {
 	// Build background bitmap from bg.png.
 	src, err := png.Decode(bytes.NewReader(uiBgPNG))
 	if err != nil {
-		core.Log.Printf("uiwindow: bg.png decode error: %v", err)
+		logevent.Emit(binlog.TagSystem, logevent.EventWinUiwindowLifecycle,
+			logevent.Str(logevent.AttrStage, "bg_decode_failed"),
+			logevent.Str(logevent.AttrDetail, err.Error()))
 		return
 	}
 	scaled := bilinearScale(src, uiW, uiH)
@@ -1341,7 +1421,7 @@ func (aw *AppWindow) initGDI() {
 		uintptr(unsafe.Pointer(&bi)), 0,
 		uintptr(unsafe.Pointer(&bits)), 0, 0)
 	if hbm == 0 {
-		core.Log.Printf("uiwindow: CreateDIBSection failed")
+		logevent.Emit(binlog.TagSystem, logevent.EventWinUiwindowLifecycle, logevent.Str(logevent.AttrStage, "dib_failed"))
 		uiDeleteDCFn.Call(memDC)
 		return
 	}
@@ -1359,10 +1439,12 @@ func (aw *AppWindow) initGDI() {
 	}
 	aw.bgMemDC = memDC
 	aw.bgBitmap = hbm
-	core.Log.Printf("uiwindow: bg bitmap ready %dx%d", uiW, uiH)
+	logevent.Emit(binlog.TagSystem, logevent.EventWinUiwindowLifecycle,
+		logevent.Str(logevent.AttrStage, "bg_ready"),
+		logevent.Str(logevent.AttrDetail, fmt.Sprintf("%dx%d", uiW, uiH)))
 
-	idlePNG, connectingPNG, connectedPNG := aw.themedCatPNGs()
-	aw.loadCatBitmaps(idlePNG, connectingPNG, connectedPNG)
+	idlePNG, connectingPNG, connectedPNG, wildcatPNG := aw.themedCatPNGs()
+	aw.loadCatBitmaps(idlePNG, connectingPNG, connectedPNG, wildcatPNG)
 }
 
 // catEntry pairs one illustration's source PNG bytes with the DC/bitmap
@@ -1383,17 +1465,20 @@ type catEntry struct {
 // Callers must free any bitmaps already present in the target fields
 // before calling this (see freeGDI's freeDIB pattern) -- it always
 // overwrites, never frees what it's replacing.
-func (aw *AppWindow) loadCatBitmaps(idlePNG, connectingPNG, connectedPNG []byte) {
+func (aw *AppWindow) loadCatBitmaps(idlePNG, connectingPNG, connectedPNG, wildcatPNG []byte) {
 	// Load cat images (pre-multiplied alpha, catSizeÃ—catSize).
 	cats := []catEntry{
 		{idlePNG, &aw.catIdleDC, &aw.catIdleBM},
 		{connectingPNG, &aw.catConnectingDC, &aw.catConnBM},
 		{connectedPNG, &aw.catConnectedDC, &aw.catConBM},
+		{wildcatPNG, &aw.catWildcatDC, &aw.catWildcatBM},
 	}
 	for _, c := range cats {
 		img, err := png.Decode(bytes.NewReader(c.data))
 		if err != nil {
-			core.Log.Printf("uiwindow: cat png decode error: %v", err)
+			logevent.Emit(binlog.TagSystem, logevent.EventWinUiwindowLifecycle,
+				logevent.Str(logevent.AttrStage, "cat_decode_failed"),
+				logevent.Str(logevent.AttrDetail, err.Error()))
 			continue
 		}
 		scaled := bilinearScale(img, catSize, catSize)
@@ -1442,11 +1527,14 @@ func (aw *AppWindow) loadCatBitmaps(idlePNG, connectingPNG, connectedPNG []byte)
 		{idlePNG, &aw.catIdleBgDC, &aw.catIdleBgBM},
 		{connectingPNG, &aw.catConnectingBgDC, &aw.catConnectingBgBM},
 		{connectedPNG, &aw.catConnectedBgDC, &aw.catConnectedBgBM},
+		{wildcatPNG, &aw.catWildcatBgDC, &aw.catWildcatBgBM},
 	}
 	for _, c := range catsBg {
 		img, err := png.Decode(bytes.NewReader(c.data))
 		if err != nil {
-			core.Log.Printf("uiwindow: cat bg png decode error: %v", err)
+			logevent.Emit(binlog.TagSystem, logevent.EventWinUiwindowLifecycle,
+				logevent.Str(logevent.AttrStage, "cat_bg_decode_failed"),
+				logevent.Str(logevent.AttrDetail, err.Error()))
 			continue
 		}
 		scaled := bilinearScale(img, uiW, uiH)
@@ -1520,9 +1608,11 @@ func (aw *AppWindow) freeGDI() {
 	freeDIB(aw.catIdleDC, aw.catIdleBM)
 	freeDIB(aw.catConnectingDC, aw.catConnBM)
 	freeDIB(aw.catConnectedDC, aw.catConBM)
+	freeDIB(aw.catWildcatDC, aw.catWildcatBM)
 	freeDIB(aw.catIdleBgDC, aw.catIdleBgBM)
 	freeDIB(aw.catConnectingBgDC, aw.catConnectingBgBM)
 	freeDIB(aw.catConnectedBgDC, aw.catConnectedBgBM)
+	freeDIB(aw.catWildcatBgDC, aw.catWildcatBgBM)
 }
 
 // ReloadClubTheme requests switching the illustration set and header badge
@@ -1604,18 +1694,22 @@ func (aw *AppWindow) applyClubTheme(theme, badgeText string) {
 	freeDIB(aw.catIdleDC, aw.catIdleBM)
 	freeDIB(aw.catConnectingDC, aw.catConnBM)
 	freeDIB(aw.catConnectedDC, aw.catConBM)
+	freeDIB(aw.catWildcatDC, aw.catWildcatBM)
 	freeDIB(aw.catIdleBgDC, aw.catIdleBgBM)
 	freeDIB(aw.catConnectingBgDC, aw.catConnectingBgBM)
 	freeDIB(aw.catConnectedBgDC, aw.catConnectedBgBM)
+	freeDIB(aw.catWildcatBgDC, aw.catWildcatBgBM)
 
 	aw.ClubTheme = theme
-	idlePNG, connectingPNG, connectedPNG := aw.themedCatPNGs()
-	aw.loadCatBitmaps(idlePNG, connectingPNG, connectedPNG)
+	idlePNG, connectingPNG, connectedPNG, wildcatPNG := aw.themedCatPNGs()
+	aw.loadCatBitmaps(idlePNG, connectingPNG, connectedPNG, wildcatPNG)
 
 	if aw.hwnd != 0 {
 		uiInvalidateRectFn.Call(aw.hwnd, 0, 0) // bErase=FALSE -- WM_PAINT double-buffers everything
 	}
-	core.Log.Printf("uiwindow: club theme reloaded -> %q", theme)
+	logevent.Emit(binlog.TagSystem, logevent.EventWinUiwindowLifecycle,
+		logevent.Str(logevent.AttrStage, "club_theme"),
+		logevent.Str(logevent.AttrDetail, theme))
 }
 
 // â”€â”€ Native menu bar â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -1645,34 +1739,35 @@ func (aw *AppWindow) createMenuBar() uintptr {
 		uiAppendMenuFn.Call(hMenu, uiMF_POPUP, hSub, uintptr(unsafe.Pointer(p)))
 	}
 
-	appendStr(hMain, uiIDMenuLogin, "Login")
-	appendStr(hMain, uiIDMenuLogout, "Logout")
+	appendStr(hMain, uiIDMenuLogin, T("login_button"))
+	appendStr(hMain, uiIDMenuLogout, T("tray_logout"))
 	appendSep(hMain)
-	appendStr(hMain, uiIDMenuConnect, "Connect")
-	appendStr(hMain, uiIDMenuDisconnect, "Disconnect")
+	appendStr(hMain, uiIDMenuConnect, T("tray_connect"))
+	appendStr(hMain, uiIDMenuDisconnect, T("tray_disconnect"))
 	appendSep(hMain)
-	appendStr(hMain, uiIDMenuDoH, "DNS over HTTPS")
-	appendStr(hMain, uiIDMenuBlockQUIC, "Disable QUIC")
+	appendStr(hMain, uiIDMenuDoH, T("tray_doh"))
+	appendStr(hMain, uiIDMenuBlockQUIC, T("tray_block_quic"))
+	appendStr(hMain, uiIDMenuWildcat, T("tray_wildcat"))
 
 	hRegion, _, _ := uiCreatePopupMenuFn.Call()
-	appendStr(hRegion, uiIDMenuRegionAuto, "Auto")
-	appendStr(hRegion, uiIDMenuRegionRussia, "Russia")
-	appendStr(hRegion, uiIDMenuRegionEurope, "Europe")
-	appendStr(hRegion, uiIDMenuRegionUSA, "USA")
-	appendStr(hRegion, uiIDMenuRegionChina, "China")
-	appendStr(hRegion, uiIDMenuRegionOther, "Other")
+	appendStr(hRegion, uiIDMenuRegionAuto, T("region_auto"))
+	appendStr(hRegion, uiIDMenuRegionRussia, T("region_russia"))
+	appendStr(hRegion, uiIDMenuRegionEurope, T("region_europe"))
+	appendStr(hRegion, uiIDMenuRegionUSA, T("region_usa"))
+	appendStr(hRegion, uiIDMenuRegionChina, T("region_china"))
+	appendStr(hRegion, uiIDMenuRegionOther, T("region_other"))
 	aw.hMenuRegion = hRegion
-	appendPopup(hMain, hRegion, "Region")
+	appendPopup(hMain, hRegion, T("menu_region"))
 
 	// Admin-only: preview any club theme regardless of actual membership.
 	// Grayed out until SetAdminAccount(true) confirms the logged-in key is
 	// an admin account -- see uiIDMenuPreviewRegular's doc comment.
 	hPreview, _, _ := uiCreatePopupMenuFn.Call()
-	appendStr(hPreview, uiIDMenuPreviewRegular, "Regular")
-	appendStr(hPreview, uiIDMenuPreviewCatClub, "Cat Club")
-	appendStr(hPreview, uiIDMenuPreviewElite, "Elite Cat Club")
+	appendStr(hPreview, uiIDMenuPreviewRegular, T("preview_regular"))
+	appendStr(hPreview, uiIDMenuPreviewCatClub, T("preview_cat_club"))
+	appendStr(hPreview, uiIDMenuPreviewElite, T("preview_elite_cat_club"))
 	aw.hMenuPreview = hPreview
-	appendPopup(hMain, hPreview, "Preview Theme")
+	appendPopup(hMain, hPreview, T("menu_preview_theme"))
 	// AppendMenu(MF_POPUP, hSubMenu, ...) uses the submenu's own handle as
 	// this item's "ID" -- EnableMenuItem+MF_BYCOMMAND can target it the
 	// same way (the popup has no WM_COMMAND id of its own to select by).
@@ -1681,17 +1776,17 @@ func (aw *AppWindow) createMenuBar() uintptr {
 	// Recommend-a-member -- grayed until SetCanRecommend(true) confirms Cat
 	// Club (or subsuming) access. Regular string item, not a popup, so it's
 	// enabled/disabled directly by its own command ID.
-	appendStr(hMain, uiIDMenuRecommend, "Recommend new Cat Club members")
+	appendStr(hMain, uiIDMenuRecommend, T("menu_recommend"))
 	uiEnableMenuItemFn.Call(hMain, uintptr(uiIDMenuRecommend), uiMF_BYCOMMAND|uiMF_GRAYED)
 
 	appendSep(hMain)
-	appendStr(hMain, uiIDMenuAbout, "About")
-	appendStr(hMain, uiIDMenuUpdate, "Update available")
+	appendStr(hMain, uiIDMenuAbout, T("tray_about"))
+	appendStr(hMain, uiIDMenuUpdate, T("tray_update"))
 	appendSep(hMain)
-	appendStr(hMain, uiIDMenuQuit, "Quit")
+	appendStr(hMain, uiIDMenuQuit, T("tray_quit"))
 
 	aw.hMenuMain = hMain
-	appendPopup(hMenuBar, hMain, "ShortNerdCat")
+	appendPopup(hMenuBar, hMain, T("app_title"))
 	return hMenuBar
 }
 
@@ -1712,6 +1807,7 @@ func (aw *AppWindow) syncMenuState(s AppSettings) {
 	}
 	uiCheckMenuItemFn.Call(aw.hMenuMain, uiIDMenuDoH, checkFlag(s.DoH))
 	uiCheckMenuItemFn.Call(aw.hMenuMain, uiIDMenuBlockQUIC, checkFlag(s.BlockQUIC))
+	uiCheckMenuItemFn.Call(aw.hMenuMain, uiIDMenuWildcat, checkFlag(s.WildCat))
 
 	if aw.hMenuRegion != 0 {
 		regionIDs := map[string]uintptr{
@@ -1802,6 +1898,14 @@ func (aw *AppWindow) createControls(hInst uintptr) {
 	aw.hConnect = mk("BUTTON", uiBSOWNERDRAW, 140, uiContY+256, 200, 40, uiIDConnect)
 	aw.hDisconnect = mk("BUTTON", uiBSOWNERDRAW, 140, uiContY+256, 200, 40, uiIDDisconnect)
 
+	// Uplink/downlink byte counter -- bottom-right, just above the full-width
+	// tunnel status bar (which is barH=36px tall at the very bottom, see
+	// paintTunnel). Right-aligned STATIC text so it hugs the corner. Starts
+	// hidden -- there's nothing meaningful to show before a tunnel exists;
+	// syncByteCounterVisibility shows/hides it in step with connect state.
+	aw.hBytesLabel = mk("STATIC", uiSSRIGHT, uiW-260-12, uiH-36-40, 260, 18, uiIDByteCounter)
+	uiShowWindowFn.Call(aw.hBytesLabel, uiSW_HIDE)
+
 	// â”€â”€ Settings tab â”€â”€
 	// All settings content (labels, checkboxes) is fully custom-painted in
 	// paintSettings.  Only the region combobox is a native control.
@@ -1811,7 +1915,7 @@ func (aw *AppWindow) createControls(hInst uintptr) {
 	aw.hRegion = mk("COMBOBOX",
 		uiCBSDROPDOWNLIST|uiCBSHASSTRINGS|uiWS_TABSTOP,
 		sx, uiContY+58, 200, 200, uiIDRegion)
-	for _, entry := range []string{"Auto (detect)", "Russia", "Europe", "USA", "China", "Other"} {
+	for _, entry := range []string{T("region_auto_detect"), T("region_russia"), T("region_europe"), T("region_usa"), T("region_china"), T("region_other")} {
 		ep, _ := windows.UTF16PtrFromString(entry)
 		uiSendMessageFn.Call(aw.hRegion, uiCB_ADDSTRING, 0, uintptr(unsafe.Pointer(ep)))
 	}
@@ -1824,9 +1928,11 @@ func (aw *AppWindow) createControls(hInst uintptr) {
 	}
 	const s1 = uiContY + 94
 	aw.hDoH = mk("BUTTON", uiBSAUTOCHECKBOX|uiWS_TABSTOP, sx, s1+22, 220, 22, uiIDDoH)
-	setText(aw.hDoH, "Use DNS over HTTPS")
+	setText(aw.hDoH, T("checkbox_doh"))
 	aw.hBlockQUIC = mk("BUTTON", uiBSAUTOCHECKBOX|uiWS_TABSTOP, sx, s1+52, 220, 22, uiIDBlockQUIC)
-	setText(aw.hBlockQUIC, "Disable QUIC")
+	setText(aw.hBlockQUIC, T("tray_block_quic"))
+	aw.hWildCat = mk("BUTTON", uiBSAUTOCHECKBOX|uiWS_TABSTOP, sx, s1+82, 220, 22, uiIDWildCat)
+	setText(aw.hWildCat, T("tray_wildcat"))
 }
 
 func (aw *AppWindow) applySettingsToControls(s AppSettings) {
@@ -1839,8 +1945,55 @@ func (aw *AppWindow) applySettingsToControls(s AppSettings) {
 	}
 	setCheck(aw.hDoH, s.DoH)
 	setCheck(aw.hBlockQUIC, s.BlockQUIC)
+	setCheck(aw.hWildCat, s.WildCat)
 	uiSendMessageFn.Call(aw.hRegion, uiCB_SETCURSEL, uintptr(regionToIndex(s.Region)), 0)
 	aw.syncMenuState(s)
+}
+
+// RefreshSettingsState re-reads s onto the Settings tab's checkboxes and the
+// window's own native menu bar. Exported so TrayApp can push a settings
+// change made directly on the tray icon's context menu back to the window --
+// see TrayApp.SetSettingsChangeCallback's doc comment for the gap this
+// closes (that direction had no path back to the window at all before).
+func (aw *AppWindow) RefreshSettingsState(s AppSettings) {
+	aw.applySettingsToControls(s)
+}
+
+// syncBlockQUICLock greys the "Disable QUIC" checkbox (Settings tab) and
+// menu item while WildCat is forcing QUIC blocked (see
+// TrayApp.IsWildcatQUICLocked) -- the checkbox's own checked state (and the
+// underlying preference behind it) is left untouched, so re-enabling it
+// once WildCat releases the lock shows exactly the state from before.
+func (aw *AppWindow) syncBlockQUICLock(locked bool) {
+	if aw.hBlockQUIC != 0 {
+		enable := uintptr(1)
+		if locked {
+			enable = 0
+		}
+		uiEnableWindowFn.Call(aw.hBlockQUIC, enable)
+	}
+	if aw.hMenuMain != 0 {
+		flag := uintptr(uiMF_BYCOMMAND | uiMF_ENABLED)
+		if locked {
+			flag = uiMF_BYCOMMAND | uiMF_GRAYED
+		}
+		uiEnableMenuItemFn.Call(aw.hMenuMain, uiIDMenuBlockQUIC, flag)
+	}
+}
+
+// syncByteCounterVisibility shows the uplink/downlink STATIC control while
+// connected and hides it otherwise (per-session counter, nothing to display
+// -- and nothing meaningful -- before a tunnel exists). Called from the
+// uiWM_UpdateStatus handler, so it always runs on the runLoop thread.
+func (aw *AppWindow) syncByteCounterVisibility(connected bool) {
+	if aw.hBytesLabel == 0 {
+		return
+	}
+	visible := uintptr(uiSW_HIDE)
+	if connected {
+		visible = uiSW_SHOW
+	}
+	uiShowWindowFn.Call(aw.hBytesLabel, visible)
 }
 
 // â”€â”€ Public API â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -1876,15 +2029,39 @@ func (aw *AppWindow) UpdateStatus(s AppStatus) {
 	select {
 	case <-aw.readyCh:
 	default:
-		core.Log.Printf("uiwindow: UpdateStatus called before ready â€” dropped (connected=%v connecting=%v disconnecting=%v)", s.Connected, s.Connecting, s.Disconnecting)
+		logevent.Emit(binlog.TagSystem, logevent.EventWinUiwindowLifecycle,
+			logevent.Str(logevent.AttrStage, "status_dropped"),
+			logevent.Str(logevent.AttrDetail, fmt.Sprintf("connected=%v connecting=%v disconnecting=%v", s.Connected, s.Connecting, s.Disconnecting)))
 		return
 	}
-	core.Log.Printf("uiwindow: UpdateStatus connected=%v connecting=%v disconnecting=%v mode=%q hwnd=0x%x", s.Connected, s.Connecting, s.Disconnecting, s.Mode, aw.hwnd)
+	logevent.Emit(binlog.TagSystem, logevent.EventWinUiwindowLifecycle,
+		logevent.Str(logevent.AttrStage, "status"),
+		logevent.Str(logevent.AttrDetail, fmt.Sprintf("UpdateStatus connected=%v connecting=%v disconnecting=%v mode=%q hwnd=0x%x", s.Connected, s.Connecting, s.Disconnecting, s.Mode, aw.hwnd)))
 	aw.mu.Lock()
 	aw.status = s
 	aw.mu.Unlock()
 	if aw.hwnd != 0 {
 		uiPostMessageFn.Call(aw.hwnd, uiWM_UpdateStatus, 0, 0)
+	}
+}
+
+// UpdateBytes pushes an updated cumulative uplink/downlink byte count
+// (core.TotalBytes()) to the window thread for display in the byte-counter
+// STATIC control. Called about once per second while connected -- see
+// TrayApp's tickElapsed in tray.go and its wiring in main_windows.go.
+// Cheap by design: unlike UpdateStatus this does not invalidate/repaint the
+// whole window, only re-sets one control's text (see uiWM_UpdateBytes).
+func (aw *AppWindow) UpdateBytes(sent, recv int64) {
+	select {
+	case <-aw.readyCh:
+	default:
+		return
+	}
+	aw.mu.Lock()
+	aw.bytesSent, aw.bytesRecv = sent, recv
+	aw.mu.Unlock()
+	if aw.hwnd != 0 {
+		uiPostMessageFn.Call(aw.hwnd, uiWM_UpdateBytes, 0, 0)
 	}
 }
 

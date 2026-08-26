@@ -94,7 +94,7 @@ class UpdateChecker(private val context: Context) {
     fun start() {
         if (running) return
         running = true
-        KotlinLog.log("UpdateChecker: start()")
+        LogEvent.emitSystem(LogEvents.UpdateCheckerStarted)
         thread = Thread({ loop() }, "snc-update-checker").apply { isDaemon = true; start() }
     }
 
@@ -111,7 +111,7 @@ class UpdateChecker(private val context: Context) {
                 break
             } catch (e: Exception) {
                 Log.w(TAG, "check error: $e")
-                KotlinLog.log("UpdateChecker: check() threw, loop continues: $e")
+                LogEvent.emitSystem(LogEvents.UpdateCheckError, LogAttrs.ATTR_Err to e.toString())
             }
             try {
                 Thread.sleep(CHECK_INTERVAL_MS)
@@ -126,11 +126,20 @@ class UpdateChecker(private val context: Context) {
         val vpnActive = SNCVpnService.isActive()
         if (controls.isEmpty()) {
             Log.d(TAG, "no controls in snc.controls — skipping check")
-            KotlinLog.log("UpdateChecker: check skipped, no controls in snc.controls (vpnActive=$vpnActive)")
+            LogEvent.emitSystem(
+                LogEvents.UpdateCheckSkipped,
+                LogAttrs.ATTR_Reason to "no_controls",
+                LogAttrs.ATTR_VpnActive to vpnActive,
+            )
             return
         }
         Log.d(TAG, "checking ${controls.size} control(s), current=${BuildConfig.VERSION_NAME}")
-        KotlinLog.log("UpdateChecker: check start, ${controls.size} control(s), current=${BuildConfig.VERSION_NAME} vpnActive=$vpnActive")
+        LogEvent.emitSystem(
+            LogEvents.UpdateCheckStart,
+            LogAttrs.ATTR_ControlCount to controls.size.toLong(),
+            LogAttrs.ATTR_CurrentVersion to BuildConfig.VERSION_NAME,
+            LogAttrs.ATTR_VpnActive to vpnActive,
+        )
 
         for (host in controls) {
             // Strip port from stored address (e.g. "62.238.3.12:443") -- always use
@@ -139,20 +148,28 @@ class UpdateChecker(private val context: Context) {
             val remoteVersion = httpGetText(ip, UPDATE_PORT, "/client-android-version")
             if (remoteVersion == null) {
                 Log.w(TAG, "fetch failed: $ip:$UPDATE_PORT/client-android-version")
-                KotlinLog.log("UpdateChecker: fetch failed control=$ip vpnActive=$vpnActive")
+                LogEvent.emitSystem(LogEvents.UpdateFetchFailed, LogAttrs.ATTR_Control to ip)
                 continue
             }
             val version = remoteVersion.trim()
             Log.d(TAG, "control=$ip remote=$version current=${BuildConfig.VERSION_NAME}")
             if (!isValidVersion(version)) {
                 Log.w(TAG, "invalid version string: '$version'")
-                KotlinLog.log("UpdateChecker: control=$ip returned invalid version string '$version'")
+                LogEvent.emitSystem(
+                    LogEvents.UpdateInvalidVersion,
+                    LogAttrs.ATTR_Control to ip,
+                    LogAttrs.ATTR_Version to version,
+                )
                 continue
             }
             val prefs = context.getSharedPreferences("snc", Context.MODE_PRIVATE)
             if (version <= BuildConfig.VERSION_NAME) {
                 Log.d(TAG, "up to date (remote=$version current=${BuildConfig.VERSION_NAME})")
-                KotlinLog.log("UpdateChecker: up to date, control=$ip remote=$version current=${BuildConfig.VERSION_NAME}")
+                LogEvent.emitSystem(
+                    LogEvents.UpdateUpToDate,
+                    LogAttrs.ATTR_Control to ip,
+                    LogAttrs.ATTR_RemoteVersion to version,
+                )
                 clearAll(prefs)
                 return
             }
@@ -166,7 +183,12 @@ class UpdateChecker(private val context: Context) {
             }
 
             Log.i(TAG, "update available: $version (current ${BuildConfig.VERSION_NAME}) — downloading silently")
-            KotlinLog.log("UpdateChecker: update available $version (current ${BuildConfig.VERSION_NAME}) via control=$ip vpnActive=$vpnActive — downloading silently")
+            LogEvent.emitSystem(
+                LogEvents.UpdateAvailable,
+                LogAttrs.ATTR_Control to ip,
+                LogAttrs.ATTR_Version to version,
+                LogAttrs.ATTR_VpnActive to vpnActive,
+            )
             val sha256 = httpGetText(ip, UPDATE_PORT, "/client-android.sha256")?.trim()?.split(" ")?.firstOrNull() ?: ""
             prefs.edit()
                 .putString(PREF_UPDATE_VERSION, version)
@@ -177,11 +199,16 @@ class UpdateChecker(private val context: Context) {
             val apk = downloadAndVerify(ip, UPDATE_PORT, "/client-android", sha256)
             if (apk == null) {
                 Log.w(TAG, "silent download/verification failed for $version — will retry on next check")
-                KotlinLog.log("UpdateChecker: download/verification FAILED for $version via control=$ip vpnActive=$vpnActive — will retry")
+                LogEvent.emitSystem(
+                    LogEvents.UpdateDownloadFailed,
+                    LogAttrs.ATTR_Control to ip,
+                    LogAttrs.ATTR_Version to version,
+                    LogAttrs.ATTR_VpnActive to vpnActive,
+                )
                 return
             }
             Log.i(TAG, "update $version downloaded and verified — ready to install")
-            KotlinLog.log("UpdateChecker: update $version downloaded and verified — ready to install")
+            LogEvent.emitSystem(LogEvents.UpdateReady, LogAttrs.ATTR_Version to version)
             prefs.edit()
                 .putString(PREF_READY_VERSION, version)
                 .putString(PREF_READY_PATH, apk.absolutePath)
@@ -190,7 +217,11 @@ class UpdateChecker(private val context: Context) {
             return
         }
         Log.w(TAG, "no control returned a valid version")
-        KotlinLog.log("UpdateChecker: no control returned a valid version (${controls.size} tried, vpnActive=$vpnActive)")
+        LogEvent.emitSystem(
+            LogEvents.UpdateNoValidVersion,
+            LogAttrs.ATTR_ControlCount to controls.size.toLong(),
+            LogAttrs.ATTR_VpnActive to vpnActive,
+        )
     }
 
     // snc-core's local SOCKS5 proxy, when the VPN is active -- see openConnection's
@@ -230,7 +261,12 @@ class UpdateChecker(private val context: Context) {
             return openDirect(host, port, connectTimeoutMs)
         } catch (e: Exception) {
             Log.w(TAG, "openConnection: direct attempt failed, trying SOCKS5: $e")
-            KotlinLog.log("UpdateChecker: direct attempt to $host:$port failed ($e), trying SOCKS5")
+            LogEvent.emitSystem(
+                LogEvents.UpdateDirectAttemptFailed,
+                LogAttrs.ATTR_Host to host,
+                LogAttrs.ATTR_Port to port.toLong(),
+                LogAttrs.ATTR_Err to e.toString(),
+            )
         }
         return openViaSocks(host, port, connectTimeoutMs)
     }
@@ -368,12 +404,29 @@ class UpdateChecker(private val context: Context) {
                 out.toString("UTF-8")
             } ?: run {
                 Log.w(TAG, "$host:$port$path: protect() refused socket (VPN active)")
-                KotlinLog.log("UpdateChecker: PROTECT REFUSED $host:$port$path (VpnService.protect() returned false while VPN active)")
+                LogEvent.emitSystem(
+                    LogEvents.UpdateHttpFailed,
+                    LogAttrs.ATTR_Host to host,
+                    LogAttrs.ATTR_Port to port.toLong(),
+                    LogAttrs.ATTR_Path to path,
+                    LogAttrs.ATTR_Stage to "fetch",
+                    LogAttrs.ATTR_Reason to "protect_refused",
+                    LogAttrs.ATTR_VpnActive to true,
+                )
                 null
             }
         } catch (e: Exception) {
             Log.w(TAG, "httpGetText $host:$port$path failed: $e")
-            KotlinLog.log("UpdateChecker: httpGetText $host:$port$path FAILED vpnActive=${SNCVpnService.isActive()}: $e")
+            LogEvent.emitSystem(
+                LogEvents.UpdateHttpFailed,
+                LogAttrs.ATTR_Host to host,
+                LogAttrs.ATTR_Port to port.toLong(),
+                LogAttrs.ATTR_Path to path,
+                LogAttrs.ATTR_Stage to "fetch",
+                LogAttrs.ATTR_Reason to "exception",
+                LogAttrs.ATTR_VpnActive to SNCVpnService.isActive(),
+                LogAttrs.ATTR_Err to e.toString(),
+            )
             null
         }
     }
@@ -389,7 +442,16 @@ class UpdateChecker(private val context: Context) {
                 val sock = openConnection(host, port, 30_000)
                 if (sock == null) {
                     Log.w(TAG, "download attempt ${attempt + 1}/3: protect() refused socket (VPN active)")
-                    KotlinLog.log("UpdateChecker: PROTECT REFUSED download attempt ${attempt + 1}/3 $host:$port$path (VpnService.protect() returned false while VPN active)")
+                    LogEvent.emitSystem(
+                        LogEvents.UpdateHttpFailed,
+                        LogAttrs.ATTR_Host to host,
+                        LogAttrs.ATTR_Port to port.toLong(),
+                        LogAttrs.ATTR_Path to path,
+                        LogAttrs.ATTR_Stage to "download",
+                        LogAttrs.ATTR_Reason to "protect_refused",
+                        LogAttrs.ATTR_Attempt to attempt.toLong(),
+                        LogAttrs.ATTR_VpnActive to true,
+                    )
                     return@repeat
                 }
                 sock.use {
@@ -410,7 +472,17 @@ class UpdateChecker(private val context: Context) {
                 }
             } catch (e: Exception) {
                 Log.w(TAG, "download attempt ${attempt + 1}/3 failed: $e")
-                KotlinLog.log("UpdateChecker: download attempt ${attempt + 1}/3 $host:$port$path FAILED vpnActive=${SNCVpnService.isActive()}: $e")
+                LogEvent.emitSystem(
+                    LogEvents.UpdateHttpFailed,
+                    LogAttrs.ATTR_Host to host,
+                    LogAttrs.ATTR_Port to port.toLong(),
+                    LogAttrs.ATTR_Path to path,
+                    LogAttrs.ATTR_Stage to "download",
+                    LogAttrs.ATTR_Reason to "exception",
+                    LogAttrs.ATTR_Attempt to attempt.toLong(),
+                    LogAttrs.ATTR_VpnActive to SNCVpnService.isActive(),
+                    LogAttrs.ATTR_Err to e.toString(),
+                )
                 out.delete()
             }
         }

@@ -72,9 +72,15 @@ func windowPushClubTheme(b []byte) {
 	C.free(unsafe.Pointer(cs))
 }
 
+func windowPushBytes(b []byte) {
+	cs := C.CString(string(b))
+	C.snc_window_push_bytes(cs)
+	C.free(unsafe.Pointer(cs))
+}
+
 func windowBuildAppMenu() { C.snc_window_build_app_menu() }
 
-func windowSyncAppMenu(doh, quic bool, region string, updateReady bool) {
+func windowSyncAppMenu(doh, quic, wildcat bool, region string, updateReady, quicLocked bool) {
 	boolC := func(v bool) C.int {
 		if v {
 			return 1
@@ -82,11 +88,21 @@ func windowSyncAppMenu(doh, quic bool, region string, updateReady bool) {
 		return 0
 	}
 	cr := C.CString(region)
-	C.snc_window_sync_app_menu(boolC(doh), boolC(quic), cr, boolC(updateReady))
+	C.snc_window_sync_app_menu(boolC(doh), boolC(quic), boolC(wildcat), cr, boolC(updateReady), boolC(quicLocked))
 	C.free(unsafe.Pointer(cr))
 }
 
 // â”€â”€ Exported CGo callbacks invoked from Objective-C â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+// go_snc_translate looks up key (see strings_darwin.go) and returns the
+// translated string as a newly-allocated C string. The caller (window_cocoa.m's
+// SNCT() helper) owns the returned pointer and must free() it -- same
+// malloc/free convention as any other C.CString crossing the cgo boundary.
+//
+//export go_snc_translate
+func go_snc_translate(key *C.char) *C.char {
+	return C.CString(T(C.GoString(key)))
+}
 
 //export go_snc_connect
 func go_snc_connect() {
@@ -234,6 +250,16 @@ func go_snc_menu_toggle_quic() {
 	if globalTray != nil {
 		select {
 		case globalTray.menuQUICCh <- struct{}{}:
+		default:
+		}
+	}
+}
+
+//export go_snc_menu_toggle_wildcat
+func go_snc_menu_toggle_wildcat() {
+	if globalTray != nil {
+		select {
+		case globalTray.menuWildcatCh <- struct{}{}:
 		default:
 		}
 	}

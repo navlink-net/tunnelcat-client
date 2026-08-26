@@ -95,7 +95,7 @@ enum NavlinkAuth {
             }
             guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let key = json["key"] as? String else {
-                completion(.failure(NavlinkError(statusCode: status, message: "malformed response")))
+                completion(.failure(NavlinkError(statusCode: status, message: L.t("navlink.error.badResponse"))))
                 return
             }
             let issued = IssuedKey(
@@ -107,11 +107,11 @@ enum NavlinkAuth {
     }
 
     private static func errorMessage(from data: Data?) -> String {
-        guard let data, !data.isEmpty else { return "request failed" }
+        guard let data, !data.isEmpty else { return L.t("navlink.error.unknown") }
         if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
            let msg = json["error"] as? String {
             return msg
         }
-        return String(data: data, encoding: .utf8) ?? "request failed"
+        return String(data: data, encoding: .utf8) ?? L.t("navlink.error.unknown")
     }
 }

@@ -5,14 +5,14 @@
 #   VERSION=20260516 ./deploy.sh [--skip-build]
 #
 # Optional env var overrides:
-#   ARBITER_HOST   SSH target (required, e.g. root@your-arbiter-host)
+#   ARBITER_HOST   SSH target (default: root@62.238.9.103)
 #   ARBITER_URL    HTTPS base URL (derived from ARBITER_HOST if not set)
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APK="${SCRIPT_DIR}/app/build/outputs/apk/release/app-release.apk"
-ARBITER_HOST="${ARBITER_HOST:?set ARBITER_HOST to your own arbiter SSH target, e.g. root@your-arbiter-host}"
+ARBITER_HOST="${ARBITER_HOST:-root@62.238.9.103}"
 ARBITER_IP="${ARBITER_HOST##*@}"
 ARBITER_URL="${ARBITER_URL:-https://${ARBITER_IP}}"
 SKIP_BUILD=false
@@ -58,7 +58,7 @@ if [[ -z "$AAPT" ]]; then
     done
 fi
 if [[ -n "$AAPT" ]]; then
-    APK_VERSION_NAME=$("$AAPT" dump badging "$APK" 2>/dev/null | grep -oP "(?<=versionName=')[^']+")
+    APK_VERSION_NAME=$("$AAPT" dump badging "$APK" 2>/dev/null | sed -n "s/.*versionName='\([^']*\)'.*/\1/p")
     if [[ -z "$APK_VERSION_NAME" ]]; then
         echo "WARNING: could not read versionName from $APK via aapt -- skipping version-match check"
     elif [[ "$APK_VERSION_NAME" != "$VERSION" ]]; then

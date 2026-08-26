@@ -5,7 +5,7 @@
 #   ./deploy.sh [--skip-build] [--skip-notarize]
 #
 # Environment variables (override defaults):
-#   ARBITER_URL   base URL of the arbiter          (required, e.g. https://your-arbiter-host)
+#   ARBITER_URL   base URL of the arbiter          (default: https://62.238.9.103)
 #   UPLOAD_KEY    Bearer token for /admin/downloads/upload
 #
 # Sensitive credentials for signing/notarization are loaded from .env in the
@@ -23,8 +23,8 @@ fi
 
 # ── Defaults ──────────────────────────────────────────────────────────────────
 
-ARBITER_URL="${ARBITER_URL:?set ARBITER_URL to your own arbiter, e.g. https://your-arbiter-host}"
-UPLOAD_KEY="${UPLOAD_KEY:?set UPLOAD_KEY to your own arbiter's admin upload key}"
+ARBITER_URL="${ARBITER_URL:-https://62.238.9.103}"
+UPLOAD_KEY="${UPLOAD_KEY:-6bf6076701ab343ac8342d00f5fd7b1df5874fae307918d0b247f6a89d65fe4b}"
 
 SKIP_BUILD=false
 SKIP_NOTARIZE=false

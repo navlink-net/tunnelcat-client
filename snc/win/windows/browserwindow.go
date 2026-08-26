@@ -13,9 +13,12 @@ import (
 	"runtime/debug"
 	"sync"
 
+	"fmt"
+
 	webview2 "github.com/jchv/go-webview2"
 	"golang.org/x/sys/windows"
-	"tunnel_cat/snc/core"
+	"tunnel_cat/binlog"
+	"tunnel_cat/logevent"
 )
 
 // uiDir is the working directory for UI assets written to disk at runtime.
@@ -82,13 +85,15 @@ func (bw *BrowserWindow) Destroy() {
 func (bw *BrowserWindow) runLoop() {
 	defer func() {
 		if r := recover(); r != nil {
-			core.Log.Printf("browser: runLoop PANIC: %v\n%s", r, debug.Stack())
+			logevent.Emit(binlog.TagSystem, logevent.EventWinBrowserWindow,
+				logevent.Str(logevent.AttrStage, "panic"),
+				logevent.Str(logevent.AttrDetail, fmt.Sprintf("%v\n%s", r, debug.Stack())))
 			close(bw.readyCh)
 		}
 	}()
 	runtime.LockOSThread()
 
-	core.Log.Printf("browser: creating WebView2...")
+	logevent.Emit(binlog.TagSystem, logevent.EventWinBrowserWindow, logevent.Str(logevent.AttrStage, "creating"))
 	wv := webview2.NewWithOptions(webview2.WebViewOptions{
 		Debug:    false,
 		DataPath: `C:\.shortnerdcat\webview2-browser`,
@@ -101,11 +106,13 @@ func (bw *BrowserWindow) runLoop() {
 		AutoFocus: true,
 	})
 	if wv == nil {
-		core.Log.Printf("browser: WebView2 init failed")
+		logevent.Emit(binlog.TagSystem, logevent.EventWinBrowserWindow, logevent.Str(logevent.AttrStage, "init_failed"))
 		close(bw.readyCh)
 		return
 	}
-	core.Log.Printf("browser: WebView2 ready hwnd=0x%x", uintptr(wv.Window()))
+	logevent.Emit(binlog.TagSystem, logevent.EventWinBrowserWindow,
+		logevent.Str(logevent.AttrStage, "ready"),
+		logevent.Str(logevent.AttrAddr, fmt.Sprintf("0x%x", uintptr(wv.Window()))))
 	bw.wv = wv
 
 	hwnd := uintptr(wv.Window())
@@ -116,7 +123,9 @@ func (bw *BrowserWindow) runLoop() {
 	bwCB := windows.NewCallback(func(h, msg, wp, lp uintptr) uintptr {
 		defer func() {
 			if r := recover(); r != nil {
-				core.Log.Printf("browser: WndProc PANIC: %v\n%s", r, debug.Stack())
+				logevent.Emit(binlog.TagSystem, logevent.EventWinBrowserWindow,
+					logevent.Str(logevent.AttrStage, "wndproc_panic"),
+					logevent.Str(logevent.AttrDetail, fmt.Sprintf("%v\n%s", r, debug.Stack())))
 			}
 		}()
 		if msg == wvWMClose {
@@ -141,7 +150,7 @@ func (bw *BrowserWindow) runLoop() {
 	wv.Navigate("https://www.navlink.net")
 
 	close(bw.readyCh)
-	core.Log.Printf("browser: entering Run()")
+	logevent.Emit(binlog.TagSystem, logevent.EventWinBrowserWindow, logevent.Str(logevent.AttrStage, "entering_run"))
 	wv.Run()
 	wv.Destroy()
 }

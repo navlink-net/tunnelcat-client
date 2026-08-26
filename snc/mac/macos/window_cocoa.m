@@ -16,6 +16,7 @@
 #import <Cocoa/Cocoa.h>
 #import <WebKit/WebKit.h>
 #import <CoreImage/CoreImage.h>
+#include <stdlib.h>
 #include "window_cocoa.h"
 
 // Go callbacks — implemented via //export in window_cgo_darwin.go.
@@ -36,6 +37,7 @@ extern void go_snc_menu_connect(void);
 extern void go_snc_menu_disconnect(void);
 extern void go_snc_menu_toggle_doh(void);
 extern void go_snc_menu_toggle_quic(void);
+extern void go_snc_menu_toggle_wildcat(void);
 extern void go_snc_menu_region(const char *code);
 extern void go_snc_menu_about(void);
 extern void go_snc_menu_update(void);
@@ -43,6 +45,20 @@ extern void go_snc_menu_quit(void);
 // Club / recommend callbacks
 extern void go_snc_recommend(const char *usernameStr);
 extern void go_snc_club_theme_preview(const char *themeStr);
+// Localization -- go_snc_translate returns a malloc'd C string (via cgo's
+// C.CString) that the caller must free(). SNCT() below wraps that convention.
+extern char *go_snc_translate(const char *key);
+
+// SNCT looks up an i18n key via Go's T() (see macos/strings_darwin.go) and
+// returns an autoreleased NSString. Frees the malloc'd buffer returned by
+// go_snc_translate immediately after copying it into the NSString.
+static NSString *SNCT(const char *key) {
+    char *cstr = go_snc_translate(key);
+    if (!cstr) return @"";
+    NSString *s = [NSString stringWithUTF8String:cstr];
+    free(cstr);
+    return s ?: @"";
+}
 
 // ── In-memory asset store ─────────────────────────────────────────────────────
 
@@ -307,6 +323,12 @@ void snc_window_push_club_theme(const char *themeJSON) {
     evalJS(js);
 }
 
+void snc_window_push_bytes(const char *bytesJSON) {
+    NSString *js = [NSString stringWithFormat:
+        @"window.onBytesUpdate && window.onBytesUpdate(%s)", bytesJSON];
+    evalJS(js);
+}
+
 // ── Native key-entry panel (non-modal) ───────────────────────────────────────
 //
 // Using a non-modal NSWindow instead of [NSAlert runModal] keeps the main run
@@ -347,7 +369,7 @@ static NSTextView  *sncKeyTextView    = nil;
 
 - (void)scanImageClicked:(id)sender {
     NSOpenPanel *panel = [NSOpenPanel openPanel];
-    panel.title                    = @"Select QR Code Image";
+    panel.title                    = SNCT("win_scan_panel_title");
     panel.allowsMultipleSelection  = NO;
     panel.canChooseDirectories     = NO;
     panel.allowedFileTypes         = @[@"png", @"jpg", @"jpeg", @"bmp", @"gif", @"tiff", @"heic"];
@@ -359,8 +381,8 @@ static NSTextView  *sncKeyTextView    = nil;
         if (!ciImg) {
             dispatch_async(dispatch_get_main_queue(), ^{
                 NSAlert *a = [[NSAlert alloc] init];
-                a.messageText    = @"Cannot read image";
-                a.informativeText = @"The selected file could not be loaded as an image.";
+                a.messageText    = SNCT("win_scan_bad_image_title");
+                a.informativeText = SNCT("win_scan_bad_image_msg");
                 [a runModal];
             });
             return;
@@ -382,8 +404,8 @@ static NSTextView  *sncKeyTextView    = nil;
                 [sncKeyTextView setString:found];
             } else {
                 NSAlert *a = [[NSAlert alloc] init];
-                a.messageText     = @"No QR code found";
-                a.informativeText = @"The selected image does not contain a recognizable QR code.";
+                a.messageText     = SNCT("win_scan_no_qr_title");
+                a.informativeText = SNCT("win_scan_no_qr_msg");
                 [a runModal];
             }
         });
@@ -456,7 +478,7 @@ void snc_window_show_key_entry(void) {
                                     NSWindowStyleMaskClosable
                             backing:NSBackingStoreBuffered
                               defer:NO];
-            [sncKeyPanel setTitle:@"ShortNerdCat — Subscription Key"];
+            [sncKeyPanel setTitle:SNCT("win_key_title")];
             [sncKeyPanel setLevel:NSFloatingWindowLevel];
             [sncKeyPanel center];
 
@@ -466,7 +488,7 @@ void snc_window_show_key_entry(void) {
             NSView *cv = [sncKeyPanel contentView];
 
             NSTextField *label = [NSTextField labelWithString:
-                @"Paste your ShortNerdCat subscription key:"];
+                SNCT("win_key_label")];
             label.frame = NSMakeRect(20, 192, 440, 20);
             [cv addSubview:label];
 
@@ -488,25 +510,25 @@ void snc_window_show_key_entry(void) {
             [sv setDocumentView:sncKeyTextView];
             [cv addSubview:sv];
 
-            NSButton *pasteBtn = [NSButton buttonWithTitle:@"Paste from Clipboard"
+            NSButton *pasteBtn = [NSButton buttonWithTitle:SNCT("win_key_paste")
                                                     target:sncKeyPanelDelegate
                                                     action:@selector(pasteClicked:)];
             pasteBtn.frame = NSMakeRect(20, 20, 160, 32);
             [cv addSubview:pasteBtn];
 
-            NSButton *scanImgBtn = [NSButton buttonWithTitle:@"Scan from Image"
+            NSButton *scanImgBtn = [NSButton buttonWithTitle:SNCT("win_key_scan")
                                                       target:sncKeyPanelDelegate
                                                       action:@selector(scanImageClicked:)];
             scanImgBtn.frame = NSMakeRect(188, 20, 87, 32);
             [cv addSubview:scanImgBtn];
 
-            NSButton *cancelBtn = [NSButton buttonWithTitle:@"Cancel"
+            NSButton *cancelBtn = [NSButton buttonWithTitle:SNCT("win_cancel")
                                                      target:sncKeyPanelDelegate
                                                      action:@selector(cancelClicked:)];
             cancelBtn.frame = NSMakeRect(283, 20, 90, 32);
             [cv addSubview:cancelBtn];
 
-            NSButton *connectBtn = [NSButton buttonWithTitle:@"Connect"
+            NSButton *connectBtn = [NSButton buttonWithTitle:SNCT("win_connect")
                                                       target:sncKeyPanelDelegate
                                                       action:@selector(connectClicked:)];
             connectBtn.frame = NSMakeRect(381, 20, 80, 32);
@@ -578,7 +600,7 @@ void snc_window_show_have_key_prompt(void) {
                           styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
                             backing:NSBackingStoreBuffered
                               defer:NO];
-            [sncHaveKeyPanel setTitle:@"ShortNerdCat — Get Started"];
+            [sncHaveKeyPanel setTitle:SNCT("win_havekey_title")];
             [sncHaveKeyPanel setLevel:NSFloatingWindowLevel];
             [sncHaveKeyPanel center];
 
@@ -588,18 +610,18 @@ void snc_window_show_have_key_prompt(void) {
             NSView *cv = [sncHaveKeyPanel contentView];
 
             NSTextField *label = [NSTextField wrappingLabelWithString:
-                @"Do you have a ShortNerdCat activation key?"];
+                SNCT("win_havekey_question")];
             label.frame = NSMakeRect(20, 62, 400, 44);
             [cv addSubview:label];
 
-            NSButton *yesBtn = [NSButton buttonWithTitle:@"Yes, I have a key"
+            NSButton *yesBtn = [NSButton buttonWithTitle:SNCT("win_havekey_yes")
                                                    target:sncHaveKeyDelegate
                                                    action:@selector(yesClicked:)];
             yesBtn.frame = NSMakeRect(20, 20, 190, 32);
             yesBtn.keyEquivalent = @"\r";
             [cv addSubview:yesBtn];
 
-            NSButton *noBtn = [NSButton buttonWithTitle:@"No, I don't have one"
+            NSButton *noBtn = [NSButton buttonWithTitle:SNCT("win_havekey_no")
                                                   target:sncHaveKeyDelegate
                                                   action:@selector(noClicked:)];
             noBtn.frame = NSMakeRect(220, 20, 200, 32);
@@ -659,13 +681,13 @@ static BOOL             sncPasswordShown      = NO;
         [sncPasswordPlainField setStringValue:current];
         sncPasswordField.hidden = YES;
         sncPasswordPlainField.hidden = NO;
-        [sncPasswordEyeBtn setTitle:@"Hide"];
+        [sncPasswordEyeBtn setTitle:SNCT("win_login_hide")];
         [sncLoginPanel makeFirstResponder:sncPasswordPlainField];
     } else {
         [sncPasswordField setStringValue:current];
         sncPasswordPlainField.hidden = YES;
         sncPasswordField.hidden = NO;
-        [sncPasswordEyeBtn setTitle:@"Show"];
+        [sncPasswordEyeBtn setTitle:SNCT("win_login_show")];
         [sncLoginPanel makeFirstResponder:sncPasswordField];
     }
 }
@@ -715,7 +737,7 @@ void snc_window_show_credential_login(void) {
                           styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
                             backing:NSBackingStoreBuffered
                               defer:NO];
-            [sncLoginPanel setTitle:@"ShortNerdCat — Log In"];
+            [sncLoginPanel setTitle:SNCT("win_login_title")];
             [sncLoginPanel setLevel:NSFloatingWindowLevel];
             [sncLoginPanel center];
 
@@ -724,14 +746,14 @@ void snc_window_show_credential_login(void) {
 
             NSView *cv = [sncLoginPanel contentView];
 
-            NSTextField *emailLabel = [NSTextField labelWithString:@"Email:"];
+            NSTextField *emailLabel = [NSTextField labelWithString:SNCT("win_login_email")];
             emailLabel.frame = NSMakeRect(20, 172, 400, 18);
             [cv addSubview:emailLabel];
 
             sncEmailField = [[NSTextField alloc] initWithFrame:NSMakeRect(20, 148, 400, 24)];
             [cv addSubview:sncEmailField];
 
-            NSTextField *passLabel = [NSTextField labelWithString:@"Password:"];
+            NSTextField *passLabel = [NSTextField labelWithString:SNCT("win_login_password")];
             passLabel.frame = NSMakeRect(20, 116, 400, 18);
             [cv addSubview:passLabel];
 
@@ -742,27 +764,27 @@ void snc_window_show_credential_login(void) {
             sncPasswordPlainField.hidden = YES;
             [cv addSubview:sncPasswordPlainField];
 
-            sncPasswordEyeBtn = [NSButton buttonWithTitle:@"Show"
+            sncPasswordEyeBtn = [NSButton buttonWithTitle:SNCT("win_login_show")
                                                      target:sncLoginDelegate
                                                      action:@selector(eyeClicked:)];
             sncPasswordEyeBtn.frame = NSMakeRect(378, 90, 42, 24);
             sncPasswordEyeBtn.bezelStyle = NSBezelStyleRounded;
             [cv addSubview:sncPasswordEyeBtn];
 
-            NSButton *loginBtn = [NSButton buttonWithTitle:@"Login"
+            NSButton *loginBtn = [NSButton buttonWithTitle:SNCT("win_login_button")
                                                      target:sncLoginDelegate
                                                      action:@selector(loginClicked:)];
             loginBtn.frame = NSMakeRect(20, 20, 120, 32);
             loginBtn.keyEquivalent = @"\r";
             [cv addSubview:loginBtn];
 
-            NSButton *cancelBtn = [NSButton buttonWithTitle:@"Cancel"
+            NSButton *cancelBtn = [NSButton buttonWithTitle:SNCT("win_cancel")
                                                       target:sncLoginDelegate
                                                       action:@selector(cancelClicked:)];
             cancelBtn.frame = NSMakeRect(150, 20, 120, 32);
             [cv addSubview:cancelBtn];
 
-            NSButton *keyModeBtn = [NSButton buttonWithTitle:@"I Have a Key"
+            NSButton *keyModeBtn = [NSButton buttonWithTitle:SNCT("win_login_havekey")
                                                        target:sncLoginDelegate
                                                        action:@selector(keyModeClicked:)];
             keyModeBtn.frame = NSMakeRect(280, 20, 140, 32);
@@ -783,6 +805,7 @@ void snc_window_show_credential_login(void) {
 
 static NSMenuItem *sncMenuDoH;
 static NSMenuItem *sncMenuQUIC;
+static NSMenuItem *sncMenuWildcat;
 static NSMenuItem *sncMenuRegionAuto;
 static NSMenuItem *sncMenuRegionRU;
 static NSMenuItem *sncMenuRegionEU;
@@ -801,6 +824,7 @@ static NSMenuItem *sncMenuUpdate;
 - (void)menuDisconnect:(id)sender { go_snc_menu_disconnect(); }
 - (void)menuToggleDoH:(id)sender  { go_snc_menu_toggle_doh(); }
 - (void)menuToggleQUIC:(id)sender { go_snc_menu_toggle_quic(); }
+- (void)menuToggleWildcat:(id)sender { go_snc_menu_toggle_wildcat(); }
 - (void)menuRegion:(id)sender {
     NSString *code = [(NSMenuItem *)sender representedObject];
     go_snc_menu_region(code ? [code UTF8String] : "");
@@ -836,30 +860,31 @@ void snc_window_build_app_menu(void) {
             NSMenu *appMenu = [[NSMenu alloc] initWithTitle:@"ShortNerdCat"];
             [topItem setSubmenu:appMenu];
 
-            makeItem(appMenu, @"Login",      @selector(menuLogin:));
-            makeItem(appMenu, @"Logout",     @selector(menuLogout:));
+            makeItem(appMenu, SNCT("menu_login"),      @selector(menuLogin:));
+            makeItem(appMenu, SNCT("menu_logout"),     @selector(menuLogout:));
             [appMenu addItem:[NSMenuItem separatorItem]];
-            makeItem(appMenu, @"Connect",    @selector(menuConnect:));
-            makeItem(appMenu, @"Disconnect", @selector(menuDisconnect:));
+            makeItem(appMenu, SNCT("menu_connect"),    @selector(menuConnect:));
+            makeItem(appMenu, SNCT("menu_disconnect"), @selector(menuDisconnect:));
             [appMenu addItem:[NSMenuItem separatorItem]];
-            sncMenuDoH     = makeItem(appMenu, @"DNS over HTTPS", @selector(menuToggleDoH:));
-            sncMenuQUIC    = makeItem(appMenu, @"Disable QUIC",   @selector(menuToggleQUIC:));
+            sncMenuDoH     = makeItem(appMenu, SNCT("menu_doh"),     @selector(menuToggleDoH:));
+            sncMenuQUIC    = makeItem(appMenu, SNCT("menu_quic"),    @selector(menuToggleQUIC:));
+            sncMenuWildcat = makeItem(appMenu, SNCT("menu_wildcat"), @selector(menuToggleWildcat:));
 
             // Region submenu.
-            NSMenuItem *regionTop = [[NSMenuItem alloc] initWithTitle:@"Region"
+            NSMenuItem *regionTop = [[NSMenuItem alloc] initWithTitle:SNCT("menu_region")
                                                                action:nil
                                                         keyEquivalent:@""];
             [appMenu addItem:regionTop];
-            NSMenu *regionMenu = [[NSMenu alloc] initWithTitle:@"Region"];
+            NSMenu *regionMenu = [[NSMenu alloc] initWithTitle:SNCT("menu_region")];
             [regionTop setSubmenu:regionMenu];
 
             NSArray *regionItems = @[
-                @[@"Auto",   @""],
-                @[@"Russia", @"RU"],
-                @[@"Europe", @"EU"],
-                @[@"USA",    @"US"],
-                @[@"China",  @"CN"],
-                @[@"Other",  @"XX"],
+                @[SNCT("menu_region_auto"),  @""],
+                @[SNCT("menu_region_ru"),    @"RU"],
+                @[SNCT("menu_region_eu"),    @"EU"],
+                @[SNCT("menu_region_us"),    @"US"],
+                @[SNCT("menu_region_cn"),    @"CN"],
+                @[SNCT("menu_region_other"), @"XX"],
             ];
             NSMutableArray *sncRegionMenuItems = [NSMutableArray array];
             for (NSArray *pair in regionItems) {
@@ -879,22 +904,27 @@ void snc_window_build_app_menu(void) {
             sncMenuRegionXX   = sncRegionMenuItems[5];
 
             [appMenu addItem:[NSMenuItem separatorItem]];
-            makeItem(appMenu, @"About", @selector(menuAbout:));
-            sncMenuUpdate = makeItem(appMenu, @"Update available", @selector(menuUpdate:));
+            makeItem(appMenu, SNCT("menu_about"), @selector(menuAbout:));
+            sncMenuUpdate = makeItem(appMenu, SNCT("menu_update"), @selector(menuUpdate:));
             [sncMenuUpdate setEnabled:NO];
             [appMenu addItem:[NSMenuItem separatorItem]];
-            makeItem(appMenu, @"Quit ShortNerdCat", @selector(menuQuit:));
+            makeItem(appMenu, SNCT("menu_quit"), @selector(menuQuit:));
         }
     });
 }
 
-void snc_window_sync_app_menu(int doh, int quic, const char *region, int updateReady) {
+void snc_window_sync_app_menu(int doh, int quic, int wildcat, const char *region, int updateReady, int quicLocked) {
     dispatch_async(dispatch_get_main_queue(), ^{
         @autoreleasepool {
             if (!sncMenuDoH) return; // not built yet
             sncMenuDoH.state     = doh     ? NSControlStateValueOn : NSControlStateValueOff;
             sncMenuQUIC.state    = quic    ? NSControlStateValueOn : NSControlStateValueOff;
-            [sncMenuQUIC setEnabled:YES];
+            sncMenuWildcat.state = wildcat ? NSControlStateValueOn : NSControlStateValueOff;
+            // WildCat forces QUIC blocked for the session -- grey the item
+            // instead of hiding it (NSMenu has no per-item hide short of
+            // rebuilding the menu); the checkbox's own state above is left
+            // untouched so it reads correctly again once unlocked.
+            [sncMenuQUIC setEnabled:quicLocked ? NO : YES];
             [sncMenuUpdate setEnabled:updateReady ? YES : NO];
 
             NSString *code = region ? [NSString stringWithUTF8String:region] : @"";

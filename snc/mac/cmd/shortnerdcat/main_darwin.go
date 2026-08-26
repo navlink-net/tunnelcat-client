@@ -1531,7 +1531,7 @@ func main() {
 						return dialerPool.Pick()
 					},
 					func() bool {
-						// Wildcat (VK-relay covert transport) has been removed from
+						// Wildcat (covert transport) has been removed from
 						// this client; always report "not active".
 						return false
 					},
@@ -1746,7 +1746,7 @@ func main() {
 		}
 
 		// Attach fail hooks to every pool dialer regardless of transport mode.
-		// VK TURN uses a full DialerPool (not a single mux), so dead-node eviction
+		// WildCat mode uses a full DialerPool (not a single mux), so dead-node eviction
 		// and silent refresh apply here exactly as in normal mode.
 		for _, td := range initialPoolDialers {
 			attachDataFailHook(td)
@@ -1971,7 +1971,7 @@ func main() {
 				return dialerPool.Pick()
 			},
 			func() bool {
-				// Wildcat (VK-relay covert transport) has been removed from
+				// Wildcat (covert transport) has been removed from
 				// this client; always report "not active".
 				return false
 			},
@@ -1993,7 +1993,7 @@ func main() {
 				return dialerPool.Pick()
 			},
 			func() bool {
-				// Wildcat (VK-relay covert transport) has been removed from
+				// Wildcat (covert transport) has been removed from
 				// this client; always report "not active".
 				return false
 			},

@@ -1,99 +1,93 @@
-# tunnelcat-client
+# ShortNerdCat
 
-Cross-platform client for the NavLink / Tunnel Cat secure tunneling network, with
-native apps for Windows, macOS, Linux, Android, and iOS. It connects to a
-`tunnelcat-server` deployment (control/exit/arbiter nodes) to establish an
-obfuscated tunnel and route traffic through it.
+ShortNerdCat is an obfuscated proxy/VPN tunnel system designed to bypass DPI (deep packet inspection) censorship. Traffic between clients and exit nodes is made indistinguishable from regular HTTPS. The system is multi-node (one physical host per role: control, exit, arbiter) and multi-platform, with native clients for Windows, macOS, Android, iOS, and Linux. See [ARCHITECTURE.md](ARCHITECTURE.md) for the full component breakdown.
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for the client-side component breakdown
-and protocol details.
+## Getting started
 
-## Repository layout
+To make it easy for you to get started with GitLab, here's a list of recommended next steps.
 
-- `snc/win/` — Windows client
-- `snc/mac/` — macOS client
-- `snc/linux/` — Linux client
-- `snc/android/` — Android client
-- `snc/ios/` — iOS client
-- `snc/shared/` — code shared across platforms (auth helpers, theming)
-- `app/` — app resources (icons, etc.)
+Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
 
-Each platform directory has its own `build.sh` / `build.bat` (and, where
-applicable, `deploy.sh` / `deploy.bat` for packaging/signing). Start there for
-platform-specific build prerequisites.
+## Add your files
 
-## Dependency on tunnelcat-server
-
-The tunnel protocol, auth, routing, and discovery logic that every client
-platform shares lives in the `tunnelcat-server` repository (Go module
-`tunnel_cat`, package `snc/core`), not in this repo. This repo's `go.mod`
-resolves it via a local `replace`:
+* [Create](https://docs.gitlab.com/ee/user/project/repository/web_editor.html#create-a-file) or [upload](https://docs.gitlab.com/ee/user/project/repository/web_editor.html#upload-a-file) files
+* [Add files using the command line](https://docs.gitlab.com/topics/git/add_files/#add-files-to-a-git-repository) or push an existing Git repository with the following command:
 
 ```
-replace tunnel_cat => ../tunnel_cat
+cd existing_repo
+git remote add origin https://git.multi-portal.org/kostia.khait/shortnerdcat.git
+git branch -M main
+git push -uf origin main
 ```
 
-To build, clone `tunnelcat-server` as a sibling directory **literally named
-`tunnel_cat`**:
+## Integrate with your tools
 
-```
-some-folder/
-├── tunnelcat-client/    (this repo)
-└── tunnel_cat/          (clone of tunnelcat-server)
-```
+* [Set up project integrations](https://git.multi-portal.org/kostia.khait/shortnerdcat/-/settings/integrations)
 
-## Building
+## Collaborate with your team
 
-Prerequisites: Go 1.26+, plus whatever platform SDK the target requires
-(Xcode command line tools for macOS/iOS, Android SDK/NDK for Android, GTK/WebKit2GTK
-dev packages for Linux, WebView2 runtime for Windows).
+* [Invite team members and collaborators](https://docs.gitlab.com/ee/user/project/members/)
+* [Create a new merge request](https://docs.gitlab.com/ee/user/project/merge_requests/creating_merge_requests.html)
+* [Automatically close issues from merge requests](https://docs.gitlab.com/ee/user/project/issues/managing_issues.html#closing-issues-automatically)
+* [Enable merge request approvals](https://docs.gitlab.com/ee/user/project/merge_requests/approvals/)
+* [Set auto-merge](https://docs.gitlab.com/user/project/merge_requests/auto_merge/)
 
-From the repo root:
+## Test and Deploy
 
-```
-go build ./...
-go vet ./...
-```
+Use the built-in continuous integration in GitLab.
 
-For a packaged, signed build of a specific platform, use that platform's own
-build script rather than `go build` directly, e.g.:
+* [Get started with GitLab CI/CD](https://docs.gitlab.com/ee/ci/quick_start/)
+* [Analyze your code for known vulnerabilities with Static Application Security Testing (SAST)](https://docs.gitlab.com/ee/user/application_security/sast/)
+* [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/ee/topics/autodevops/requirements.html)
+* [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/ee/user/clusters/agent/)
+* [Set up protected environments](https://docs.gitlab.com/ee/ci/environments/protected_environments.html)
 
-```
-snc/win/build.bat
-snc/mac/build.sh
-snc/linux/build.sh
-snc/ios/build.sh
-snc/android/build.bat
-```
+***
 
-Read the script before running it — most require environment variables for
-signing (keystore/certificate paths and passwords) that only you can supply
-for your own build.
+# Editing this README
 
-## Third-party runtime binaries
+When you're ready to make this README your own, just edit this file and use the handy template below (or feel free to structure it however you want - this is just a starting point!). Thanks to [makeareadme.com](https://www.makeareadme.com/) for this template.
 
-This repo does not vendor any third-party binaries. The Windows client loads
-`wintun.dll` at runtime (via `golang.zx2c4.com/wintun`) — download it from
-the official WinTun release page ([https://www.wintun.net/](https://www.wintun.net/))
-and place it next to the built `shortnerdcat.exe`. It is not committed to
-this repository; `go build` does not need it, only running the built binary
-does.
+## Suggestions for a good README
 
-## Arbiter public key
+Every project is different, so consider which of these sections apply to yours. The sections used in the template are suggestions for most open source projects. Also keep in mind that while a README can be too long and detailed, too long is better than too short. If you think your README is too long, consider utilizing another form of documentation rather than cutting out information.
 
-This is the self-hosted, open-source edition: it does not ship with any
-production arbiter's public key baked in. Activation keys generated by your
-own `tunnelcat-server` arbiter already embed that arbiter's Ed25519 public key
-(see the key-string format in [ARCHITECTURE.md](ARCHITECTURE.md)), so a
-self-hoster just needs to:
+## Name
+Choose a self-explaining name for your project.
 
-1. Run their own `tunnelcat-server` deployment (arbiter + control + exit).
-2. Generate activation keys against that arbiter (e.g. via its admin API, or
-   the `keygen` tool under `snc/win/cmd/keygen/`).
-3. Distribute those keys to their own users — the client verifies the
-   manifest/exit-list signature against the pubkey embedded in the key
-   itself, not a value compiled into this repo.
+## Description
+Let people know what your project can do specifically. Provide context and add a link to any reference visitors might be unfamiliar with. A list of Features or a Background subsection can also be added here. If there are alternatives to your project, this is a good place to list differentiating factors.
+
+## Badges
+On some READMEs, you may see small images that convey metadata, such as whether or not all the tests are passing for the project. You can use Shields to add some to your README. Many services also have instructions for adding a badge.
+
+## Visuals
+Depending on what you are making, it can be a good idea to include screenshots or even a video (you'll frequently see GIFs rather than actual videos). Tools like ttygif can help, but check out Asciinema for a more sophisticated method.
+
+## Installation
+Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew. However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a specific context like a particular programming language version or operating system or has dependencies that have to be installed manually, also add a Requirements subsection.
+
+## Usage
+Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably include in the README.
+
+## Support
+Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
+
+## Roadmap
+If you have ideas for releases in the future, it is a good idea to list them in the README.
+
+## Contributing
+State if you are open to contributions and what your requirements are for accepting them.
+
+For people who want to make changes to your project, it's helpful to have some documentation on how to get started. Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps explicit. These instructions could also be useful to your future self.
+
+You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce the likelihood that the changes inadvertently break something. Having instructions for running tests is especially helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
+
+## Authors and acknowledgment
+Show your appreciation to those who have contributed to the project.
 
 ## License
+For open source projects, say how it is licensed.
 
-Apache License 2.0 — see [LICENSE](LICENSE).
+## Project status
+If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.

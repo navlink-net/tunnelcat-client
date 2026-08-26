@@ -49,19 +49,45 @@ func ShowNotifications(msgs []string) {
 // ShowKeyDialog shows an interactive entry dialog using zenity or kdialog.
 // Returns the entered string, or an error if the user cancelled.
 func ShowKeyDialog() (string, error) {
+	prompt := T("key_dialog_prompt")
 	// Try zenity first (GNOME/GTK), then kdialog (KDE).
 	if out, err := exec.Command("zenity", "--entry",
 		"--title=ShortNerdCat",
-		"--text=Enter your activation key:",
+		"--text="+prompt,
 		"--width=420",
 	).Output(); err == nil {
 		return strings.TrimSpace(string(out)), nil
 	}
 	if out, err := exec.Command("kdialog",
 		"--title=ShortNerdCat",
-		"--inputbox=Enter your activation key:",
+		"--inputbox="+prompt,
 	).Output(); err == nil {
 		return strings.TrimSpace(string(out)), nil
 	}
 	return "", nil
+}
+
+// ShowWildcatWarning shows a blocking, single-button (OK) informational
+// dialog explaining what WildCat mode does, mirroring the equivalent warning
+// shown on other platforms before WildCat is enabled. Same two-binary
+// fallback shape as ShowKeyDialog (zenity, then kdialog). Best-effort: if
+// neither binary is available, this silently does nothing rather than
+// blocking WildCat activation on a dialog helper being installed.
+func ShowWildcatWarning() {
+	title := T("wildcat_warning_title")
+	text := T("wildcat_warning_text")
+	if err := exec.Command("zenity", "--warning",
+		"--title="+title,
+		"--text="+text,
+		"--ok-label=OK",
+	).Run(); err == nil {
+		return
+	}
+	if err := exec.Command("kdialog",
+		"--title", title,
+		"--msgbox", text,
+	).Run(); err == nil {
+		return
+	}
+	core.Log.Printf("wildcat warning: neither zenity nor kdialog available")
 }

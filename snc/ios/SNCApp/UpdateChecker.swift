@@ -114,8 +114,8 @@ final class UpdateChecker: NSObject {
         defaults.set(version, forKey: prefsNotifiedVersion)
 
         let content = UNMutableNotificationContent()
-        content.title = "ShortNerdCat update available"
-        content.body = "Version \(version) is ready — tap to open the App Store"
+        content.title = L.t("update.notification.title")
+        content.body = String(format: L.t("update.notification.body"), version)
         content.sound = .default
         content.userInfo = [Self.storeURLUserInfoKey: storeURL]
 

@@ -19,7 +19,9 @@ type AppStatus struct {
 
 // AppSettings mirrors the persistent user settings.
 type AppSettings struct {
-	DoH       bool   `json:"doh"`
-	BlockQUIC bool   `json:"blockQUIC"`
-	Region    string `json:"region"` // "" = Auto; "RU"/"EU"/"US"/"CN"/"XX"
+	DoH        bool   `json:"doh"`
+	BlockQUIC  bool   `json:"blockQUIC"`
+	Region     string `json:"region"` // "" = Auto; "RU"/"EU"/"US"/"CN"/"XX"
+	WildCat    bool   `json:"wildcat"`
+	QUICLocked bool   `json:"quicLocked"` // WildCat is forcing QUIC blocked -- see TrayApp.IsWildcatQUICLocked
 }

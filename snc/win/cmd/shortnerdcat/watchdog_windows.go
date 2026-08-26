@@ -29,6 +29,8 @@ import (
 	"syscall"
 	"time"
 
+	"tunnel_cat/binlog"
+	"tunnel_cat/logevent"
 	"tunnel_cat/snc/core"
 	snwin "shortnerdcat/snc/win/windows"
 )
@@ -52,13 +54,17 @@ func runAsWatchdog() {
 	if err := core.InitLogging(`C:\.shortnerdcat\logs`); err != nil {
 		os.Stderr.WriteString("watchdog: logging init: " + err.Error() + "\n")
 	}
-	core.Log.Printf("watchdog: started pid=%d", os.Getpid())
+	logevent.Emit(binlog.TagSystem, logevent.EventWinWatchdogProcess,
+		logevent.Str(logevent.AttrStage, "started"),
+		logevent.Int(logevent.AttrPid, int64(os.Getpid())))
 
 	// Create lifecycle events before starting main so main can signal them
 	// even during its very first startup (e.g. ApplyPendingUpdate).
 	events, err := snwin.CreateWatchdogEvents()
 	if err != nil {
-		core.Log.Printf("watchdog: create events failed: %v â€” exiting", err)
+		logevent.Emit(binlog.TagSystem, logevent.EventWinWatchdogProcess,
+			logevent.Str(logevent.AttrStage, "events_create_failed"),
+			logevent.Str(logevent.AttrErr, err.Error()))
 		return
 	}
 	defer events.Close()
@@ -66,7 +72,7 @@ func runAsWatchdog() {
 	// Cleanup any stale networking state from a previous crash.
 	st := core.ReadWatchdogState()
 	if st.Connected {
-		core.Log.Printf("watchdog: stale state: connected=true â€” cleaning up")
+		logevent.Emit(binlog.TagSystem, logevent.EventWinWatchdogProcess, logevent.Str(logevent.AttrStage, "stale_state_cleanup"))
 		snwin.CleanupSession(st.OrigGW)
 	}
 	// Reset state file so any stale TunnelHealthy=true from a previous run
@@ -79,7 +85,7 @@ func runAsWatchdog() {
 	// a fresh one.
 	mainHandle := attachOrStartMain(st.MainPID)
 	if mainHandle == syscall.InvalidHandle {
-		core.Log.Printf("watchdog: failed to obtain main process handle â€” exiting")
+		logevent.Emit(binlog.TagSystem, logevent.EventWinWatchdogProcess, logevent.Str(logevent.AttrStage, "main_handle_failed"))
 		return
 	}
 
@@ -107,7 +113,7 @@ func runAsWatchdog() {
 			if !shutdownSignaled {
 				select {
 				case <-probeKill:
-					core.Log.Printf("watchdog: connectivity probe triggered restart â€” killing main")
+					logevent.Emit(binlog.TagSystem, logevent.EventWinWatchdogProcess, logevent.Str(logevent.AttrStage, "probe_restart"))
 					snwin.TerminateProcess(mainHandle)
 					mainDead = true
 				default:
@@ -121,12 +127,12 @@ func runAsWatchdog() {
 			if !shutdownSignaled && events.IsCleanShutdown() {
 				shutdownSignaled = true
 				shutdownDeadline = time.Now().Add(60 * time.Second)
-				core.Log.Printf("watchdog: clean shutdown signaled â€” waiting up to 60 s for main to exit")
+				logevent.Emit(binlog.TagSystem, logevent.EventWinWatchdogProcess, logevent.Str(logevent.AttrStage, "clean_shutdown_signaled"))
 			}
 
 			// Enforce the shutdown deadline.
 			if shutdownSignaled && time.Now().After(shutdownDeadline) {
-				core.Log.Printf("watchdog: clean shutdown timed out â€” force-killing main")
+				logevent.Emit(binlog.TagSystem, logevent.EventWinWatchdogProcess, logevent.Str(logevent.AttrStage, "clean_shutdown_timeout"))
 				snwin.TerminateProcess(mainHandle)
 				mainDead = true
 				break
@@ -139,11 +145,15 @@ func runAsWatchdog() {
 					// Before killing, wait 15 s and re-read â€” this handles
 					// hibernate/sleep resume where wall-clock time jumped but
 					// main's power-event handler hasn't called TouchAlive yet.
-					core.Log.Printf("watchdog: LastAlive stale by %s â€” waiting 15 s before killing", time.Since(time.Unix(st.LastAlive, 0)).Round(time.Second))
+					logevent.Emit(binlog.TagSystem, logevent.EventWinWatchdogProcess,
+						logevent.Str(logevent.AttrStage, "lastalive_stale_wait"),
+						logevent.Str(logevent.AttrDetail, time.Since(time.Unix(st.LastAlive, 0)).Round(time.Second).String()))
 					time.Sleep(15 * time.Second)
 					st = core.ReadWatchdogState()
 					if st.LastAlive > 0 && time.Since(time.Unix(st.LastAlive, 0)) > 5*time.Minute {
-						core.Log.Printf("watchdog: main appears frozen (last alive %s ago) â€” killing", time.Since(time.Unix(st.LastAlive, 0)).Round(time.Second))
+						logevent.Emit(binlog.TagSystem, logevent.EventWinWatchdogProcess,
+							logevent.Str(logevent.AttrStage, "lastalive_frozen_kill"),
+							logevent.Str(logevent.AttrDetail, time.Since(time.Unix(st.LastAlive, 0)).Round(time.Second).String()))
 						snwin.TerminateProcess(mainHandle)
 						mainDead = true
 					}
@@ -153,23 +163,23 @@ func runAsWatchdog() {
 
 		close(probeStop) // tell probe goroutine to exit
 		syscall.CloseHandle(mainHandle) //nolint:errcheck
-		core.Log.Printf("watchdog: main process exited")
+		logevent.Emit(binlog.TagSystem, logevent.EventWinWatchdogProcess, logevent.Str(logevent.AttrStage, "main_exited"))
 
 		// If clean shutdown was signaled (either detected during the loop or now),
 		// do not restart main â€” the user intentionally quit.
 		if shutdownSignaled || events.IsCleanShutdown() {
-			core.Log.Printf("watchdog: clean shutdown â€” exiting")
+			logevent.Emit(binlog.TagSystem, logevent.EventWinWatchdogProcess, logevent.Str(logevent.AttrStage, "exiting_clean"))
 			return
 		}
 
 		if events.IsUpdateRestart() {
-			core.Log.Printf("watchdog: OTA update signal â€” restarting main after 2s")
+			logevent.Emit(binlog.TagSystem, logevent.EventWinWatchdogProcess, logevent.Str(logevent.AttrStage, "ota_restart"))
 			time.Sleep(2 * time.Second)
 		} else {
 			// Unclean exit (crash or kill): restore networking then restart.
 			st = core.ReadWatchdogState()
 			if st.Connected {
-				core.Log.Printf("watchdog: crash detected â€” cleaning up stale session")
+				logevent.Emit(binlog.TagSystem, logevent.EventWinWatchdogProcess, logevent.Str(logevent.AttrStage, "crash_cleanup"))
 				snwin.CleanupSession(st.OrigGW)
 				// Reset state so subsequent crash iterations don't re-run cleanup
 				// against the same stale Connected=true entry.
@@ -180,7 +190,7 @@ func runAsWatchdog() {
 
 		mainHandle = startMainWithRetry()
 		if mainHandle == syscall.InvalidHandle {
-			core.Log.Printf("watchdog: could not restart main â€” giving up")
+			logevent.Emit(binlog.TagSystem, logevent.EventWinWatchdogProcess, logevent.Str(logevent.AttrStage, "restart_giveup"))
 			return
 		}
 	}
@@ -271,10 +281,12 @@ func runConnectivityProbe(stopCh <-chan struct{}, killCh chan<- struct{}) {
 		}
 
 		allFailRounds++
-		core.Log.Printf("watchdog: probe: all %d sites unreachable (round %d/3)", len(connProbeSites), allFailRounds)
+		logevent.Emit(binlog.TagSystem, logevent.EventWinWatchdogProbe,
+			logevent.Str(logevent.AttrStage, "all_unreachable"),
+			logevent.Int(logevent.AttrRound, int64(allFailRounds)))
 
 		if allFailRounds >= 3 {
-			core.Log.Printf("watchdog: probe: connectivity confirmed dead â€” signaling restart")
+			logevent.Emit(binlog.TagSystem, logevent.EventWinWatchdogProbe, logevent.Str(logevent.AttrStage, "confirmed_dead"))
 			select {
 			case killCh <- struct{}{}:
 			default:
@@ -291,20 +303,26 @@ func attachOrStartMain(statePID int) syscall.Handle {
 	if statePID != 0 {
 		h := snwin.OpenProcessForWait(statePID)
 		if h != syscall.InvalidHandle {
-			core.Log.Printf("watchdog: attached to existing main pid=%d", statePID)
+			logevent.Emit(binlog.TagSystem, logevent.EventWinWatchdogMainAttach,
+				logevent.Str(logevent.AttrStage, "attached_existing"),
+				logevent.Int(logevent.AttrPid, int64(statePID)))
 			return h
 		}
 	}
 	// Start main fresh.
 	proc, err := snwin.WatchdogStartMain()
 	if err != nil {
-		core.Log.Printf("watchdog: start main failed: %v", err)
+		logevent.Emit(binlog.TagSystem, logevent.EventWinWatchdogMainAttach,
+			logevent.Str(logevent.AttrStage, "start_failed"),
+			logevent.Str(logevent.AttrErr, err.Error()))
 		return syscall.InvalidHandle
 	}
-	core.Log.Printf("watchdog: main started pid=%d", proc.Pid)
+	logevent.Emit(binlog.TagSystem, logevent.EventWinWatchdogMainAttach,
+		logevent.Str(logevent.AttrStage, "started_fresh"),
+		logevent.Int(logevent.AttrPid, int64(proc.Pid)))
 	h := snwin.OpenProcessForWait(proc.Pid)
 	if h == syscall.InvalidHandle {
-		core.Log.Printf("watchdog: open main process handle failed â€” using proc.Wait fallback")
+		logevent.Emit(binlog.TagSystem, logevent.EventWinWatchdogMainAttach, logevent.Str(logevent.AttrStage, "handle_failed"))
 		proc.Wait() //nolint:errcheck
 		return syscall.InvalidHandle
 	}
@@ -322,7 +340,9 @@ func startMainWithRetry() syscall.Handle {
 	st := core.ReadWatchdogState()
 	if st.MainPID != 0 {
 		if h := snwin.OpenProcessForWait(st.MainPID); h != syscall.InvalidHandle {
-			core.Log.Printf("watchdog: new main already running pid=%d â€” attaching", st.MainPID)
+			logevent.Emit(binlog.TagSystem, logevent.EventWinWatchdogMainAttach,
+				logevent.Str(logevent.AttrStage, "already_running"),
+				logevent.Int(logevent.AttrPid, int64(st.MainPID)))
 			return h
 		}
 	}
@@ -332,11 +352,21 @@ func startMainWithRetry() syscall.Handle {
 		if err == nil {
 			h := snwin.OpenProcessForWait(proc.Pid)
 			if h != syscall.InvalidHandle {
-				core.Log.Printf("watchdog: main restarted pid=%d (attempt %d)", proc.Pid, attempt)
+				logevent.Emit(binlog.TagSystem, logevent.EventWinWatchdogMainAttach,
+					logevent.Str(logevent.AttrStage, "restarted"),
+					logevent.Int(logevent.AttrPid, int64(proc.Pid)),
+					logevent.Int(logevent.AttrAttempt, int64(attempt)))
 				return h
 			}
 		}
-		core.Log.Printf("watchdog: restart attempt %d failed: %v â€” retrying in 10s", attempt, err)
+		errStr := ""
+		if err != nil {
+			errStr = err.Error()
+		}
+		logevent.Emit(binlog.TagSystem, logevent.EventWinWatchdogMainAttach,
+			logevent.Str(logevent.AttrStage, "restart_failed"),
+			logevent.Int(logevent.AttrAttempt, int64(attempt)),
+			logevent.Str(logevent.AttrErr, errStr))
 		time.Sleep(10 * time.Second)
 	}
 	return syscall.InvalidHandle

@@ -30,7 +30,7 @@
 	</array>
 	<key>BGTaskSchedulerPermittedIdentifiers</key>
 	<array>
-		<string>net.shortnerdcat.client.vkrefresh</string>
+		<string>net.shortnerdcat.client.tokenrefresh</string>
 	</array>
 	<key>UIApplicationSceneManifest</key>
 	<dict>

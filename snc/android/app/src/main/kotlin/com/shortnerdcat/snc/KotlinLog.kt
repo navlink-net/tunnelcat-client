@@ -110,10 +110,18 @@ object KotlinLog {
     // least it survives in `adb logcat`/bugreport even when the file itself can't
     // be written, instead of vanishing completely.
     fun log(msg: String) {
-        val dir = logDir ?: return
         val line = "${dateFmt.format(Date())} [kl] $msg\n"
+        writeFramed(TAG_SYSTEM, line.toByteArray(Charsets.UTF_8))
+    }
+
+    // appendRecordStructured (used by LogEvent.emit) shares this same
+    // append path -- one place that owns "where do framed bytes for this
+    // process actually land", mirroring tunnel_cat/snc/core/log.go's
+    // writeFramed on the Go side.
+    internal fun writeFramed(tag: Int, payload: ByteArray) {
+        val dir = logDir ?: return
         try {
-            val framed = Binlog.appendRecord(TAG_SYSTEM, line.toByteArray(Charsets.UTF_8))
+            val framed = Binlog.appendRecord(tag, payload)
             File(dir, "snc_lifecycle.log").appendBytes(framed)
         } catch (e: Exception) {
             Log.w(TAG, "append failed, dir=$dir: $e")

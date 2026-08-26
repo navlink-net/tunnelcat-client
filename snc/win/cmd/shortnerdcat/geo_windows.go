@@ -16,6 +16,8 @@ import (
 	"time"
 	"unsafe"
 
+	"tunnel_cat/binlog"
+	"tunnel_cat/logevent"
 	core "tunnel_cat/snc/core"
 
 	"golang.org/x/sys/windows"
@@ -30,15 +32,21 @@ import (
 // Returns "" if none of the sources yield a result.
 func detectDeviceCC() string {
 	if cc := gpsCC(5 * time.Second); cc != "" {
-		core.Log.Printf("geo: GPS country=%q", cc)
+		logevent.Emit(binlog.TagSystem, logevent.EventWinGeoDetect,
+			logevent.Str(logevent.AttrSource, "gps"),
+			logevent.Str(logevent.AttrCc, cc))
 		return cc
 	}
 	if cc := systemCC(); cc != "" {
-		core.Log.Printf("geo: system-locale country=%q", cc)
+		logevent.Emit(binlog.TagSystem, logevent.EventWinGeoDetect,
+			logevent.Str(logevent.AttrSource, "system_locale"),
+			logevent.Str(logevent.AttrCc, cc))
 		return cc
 	}
 	if cc := core.TimezoneCC(); cc != "" {
-		core.Log.Printf("geo: timezone country=%q", cc)
+		logevent.Emit(binlog.TagSystem, logevent.EventWinGeoDetect,
+			logevent.Str(logevent.AttrSource, "timezone"),
+			logevent.Str(logevent.AttrCc, cc))
 		return cc
 	}
 	return ""

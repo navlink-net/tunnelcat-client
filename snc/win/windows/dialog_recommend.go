@@ -56,7 +56,7 @@ func recDlgWndProc(hwnd, msg, wParam, lParam uintptr) uintptr {
 	switch msg {
 	case wmCreate:
 		staticClass, _ := syscall.UTF16PtrFromString("STATIC")
-		labelText, _ := syscall.UTF16PtrFromString("Username to recommend for Cat Club:")
+		labelText, _ := syscall.UTF16PtrFromString(T("recommend_label"))
 		dlgUser32.NewProc("CreateWindowExW").Call(
 			0,
 			uintptr(unsafe.Pointer(staticClass)),
@@ -78,7 +78,7 @@ func recDlgWndProc(hwnd, msg, wParam, lParam uintptr) uintptr {
 
 		btnClass, _ := syscall.UTF16PtrFromString("BUTTON")
 
-		okText, _ := syscall.UTF16PtrFromString("Recommend")
+		okText, _ := syscall.UTF16PtrFromString(T("recommend_button"))
 		dlgUser32.NewProc("CreateWindowExW").Call(
 			0,
 			uintptr(unsafe.Pointer(btnClass)),
@@ -88,7 +88,7 @@ func recDlgWndProc(hwnd, msg, wParam, lParam uintptr) uintptr {
 			hwnd, idOK,
 			dlgKernelHandle(), 0)
 
-		cancelText, _ := syscall.UTF16PtrFromString("Cancel")
+		cancelText, _ := syscall.UTF16PtrFromString(T("cancel"))
 		dlgUser32.NewProc("CreateWindowExW").Call(
 			0,
 			uintptr(unsafe.Pointer(btnClass)),
@@ -162,7 +162,7 @@ func ShowRecommendDialog() (string, bool) {
 	)
 
 	className, _ := syscall.UTF16PtrFromString("SNCRecommendDlg")
-	titleText, _ := syscall.UTF16PtrFromString("ShortNerdCat — Recommend a Member")
+	titleText, _ := syscall.UTF16PtrFromString(T("recommend_dialog_title"))
 
 	wc := keyDlgWNDCLASSEX{
 		cbSize:        uint32(unsafe.Sizeof(keyDlgWNDCLASSEX{})),

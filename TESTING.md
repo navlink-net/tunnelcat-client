@@ -45,7 +45,7 @@ python -m pytest apps/tunnel/tests/test_sessions.py -v
 
 ### T-S4 · main.py — HTTP-эндпоинт
 
-Запускается тестовый экземпляр сервера `--tunnel` на порту 19443.  
+Запускается тестовый экземпляр Camerlengo `--tunnel` на порту 19443.  
 Тестовый пользователь `testuser` / `testpass` создаётся фикстурой.
 
 ```bash
@@ -104,7 +104,7 @@ cd d:/REPO/shortnerdcat && go test ./core/... -v
 
 ### T-C3 · tunnel.go
 
-Тест поднимает реальный сервер (--tunnel) локально на 127.0.0.1:19443.
+Тест поднимает реальный сервер (Camerlengo --tunnel) локально на 127.0.0.1:19443.
 
 | Тест | Проверяет |
 |---|---|
@@ -215,7 +215,7 @@ go test ./core/ -run "TLS|Pacing|H2|Decoy" -v
 | `TestH2_NegotiatedProtocol` | После handshake `ConnectionState().NegotiatedProtocol == "h2"` |
 | `TestH2_ParallelStreams` | 5 параллельных туннельных соединений → одно TCP-соединение к серверу |
 | `TestH2_Throughput` | H2-транспорт не медленнее HTTP/1.1 на одном потоке (regression) |
-| `TestH2_ServerSupport` | Сервер отвечает по h2 при ALPN `h2` |
+| `TestH2_ServerSupport` | Camerlengo отвечает по h2 при ALPN `h2` |
 
 ### T-CT4 · Decoy
 
@@ -247,7 +247,7 @@ mitmproxy --mode transparent --ssl-insecure
 ### T-S7 · Keygen — расширение SNC_Tunnel_Keygen.py
 
 ```bash
-python SNC_Tunnel_Keygen.py alice s3cr3t "host1:443,host2:443" --pubkey <base64>
+python reforce/Tools/SNC_Tunnel_Keygen.py alice s3cr3t "host1:443,host2:443" --pubkey <base64>
 ```
 
 | Тест | Проверяет |
@@ -387,7 +387,7 @@ go test ./core/ -run StateMachine -v
 ### Серверные тесты
 
 Фикстура `conftest.py` в `apps/tunnel/tests/`:
-- Запускает временный сервер `--tunnel` на `127.0.0.1:19443`
+- Запускает временный Camerlengo `--tunnel` на `127.0.0.1:19443`
 - Создаёт тестового пользователя `testuser / testpass` через `verifyPassword`
 - После тестов убивает процесс, удаляет временную БД
 

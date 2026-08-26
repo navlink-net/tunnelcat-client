@@ -7,10 +7,13 @@
 package windows
 
 import (
+	"fmt"
 	"runtime"
 	"syscall"
 	"unsafe"
 
+	"tunnel_cat/binlog"
+	"tunnel_cat/logevent"
 	"tunnel_cat/snc/core"
 )
 
@@ -69,7 +72,9 @@ func runPowerWatcher(onResume func()) {
 	wndProc := syscall.NewCallback(func(hwnd, uMsg, wParam, lParam uintptr) uintptr {
 		if uMsg == wmPowerBroadcast &&
 			(wParam == pbsApmResumeAutomatic || wParam == pbsApmResumeSuspend) {
-			core.Log.Printf("power: wake event 0x%x â€” triggering reconnect", wParam)
+			logevent.Emit(binlog.TagSystem, logevent.EventWinPower,
+				logevent.Str(logevent.AttrStage, "wake"),
+				logevent.Str(logevent.AttrValue, fmt.Sprintf("0x%x", wParam)))
 			// Refresh LastAlive immediately so the watchdog does not mistake
 			// a hibernate resume for a frozen process (the on-disk timestamp
 			// is stale by the entire sleep duration).
@@ -87,7 +92,7 @@ func runPowerWatcher(onResume func()) {
 		lpszClassName: className,
 	}
 	if atom, _, _ := procRegisterClassEx.Call(uintptr(unsafe.Pointer(&wc))); atom == 0 {
-		core.Log.Printf("power: RegisterClassExW failed â€” power events unavailable")
+		logevent.Emit(binlog.TagSystem, logevent.EventWinPower, logevent.Str(logevent.AttrStage, "class_register_failed"))
 		return
 	}
 
@@ -101,10 +106,10 @@ func runPowerWatcher(onResume func()) {
 		0, hInst, 0,                        // hMenu, hInstance, lpParam
 	)
 	if hwnd == 0 {
-		core.Log.Printf("power: CreateWindowExW failed â€” power events unavailable")
+		logevent.Emit(binlog.TagSystem, logevent.EventWinPower, logevent.Str(logevent.AttrStage, "window_create_failed"))
 		return
 	}
-	core.Log.Println("power: watcher started")
+	logevent.Emit(binlog.TagSystem, logevent.EventWinPower, logevent.Str(logevent.AttrStage, "watcher_started"))
 
 	// Pump Win32 messages; WndProc handles WM_POWERBROADCAST.
 	// Using a plain [64]byte buffer avoids importing x/sys/windows for MSG.

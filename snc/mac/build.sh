@@ -7,15 +7,14 @@
 # Prerequisites (Mac):
 #   - Go 1.21+
 #   - Xcode Command Line Tools (for codesign, xcrun, hdiutil, lipo, sips, iconutil)
-#   - Your own "Developer ID Application: <Your Name> (<TEAMID>)" identity in Keychain
+#   - Developer ID Application: Konstantin Khait (AF6BSD27T9) in Keychain
 #   - xcrun notarytool keychain profile named "notarization-profile"
 #     (set up once with: xcrun notarytool store-credentials notarization-profile
-#                         --apple-id YOUR_APPLE_ID --team-id YOUR_TEAM_ID)
+#                         --apple-id YOUR_APPLE_ID --team-id AF6BSD27T9)
 #
 # Environment variables (override defaults):
-#   CERT_ID             codesign certificate name, e.g.
-#                        "Developer ID Application: Your Name (YOUR_TEAM_ID)" (required)
-#   APPLE_TEAM_ID        Team ID for notarization (required)
+#   CERT_ID             codesign certificate name (default below)
+#   APPLE_TEAM_ID       Team ID for notarization (default AF6BSD27T9)
 #   KEYCHAIN_PROFILE    xcrun notarytool profile name (default notarization-profile)
 
 set -euo pipefail
@@ -47,8 +46,8 @@ APP_NAME="ShortNerdCat"
 BUNDLE_ID="net.navlink.shortnerdcat"
 BINARY_NAME="shortnerdcat"
 
-CERT_ID="${CERT_ID:?set CERT_ID to your own 'Developer ID Application: ...' identity}"
-APPLE_TEAM_ID="${APPLE_TEAM_ID:?set APPLE_TEAM_ID to your own Apple Developer team ID}"
+CERT_ID="${CERT_ID:-Developer ID Application: Konstantin Khait (AF6BSD27T9)}"
+APPLE_TEAM_ID="${APPLE_TEAM_ID:-AF6BSD27T9}"
 KEYCHAIN_PROFILE="${KEYCHAIN_PROFILE:-notarization-profile}"
 
 SKIP_NOTARIZE=false
@@ -101,7 +100,7 @@ BG_IMG="$ICON_SRC/bg.png"
 
 echo "Copying tray icon assets..."
 mkdir -p "$ASSETS_DST"
-for f in snc_idle.png snc_connecting.png snc_connected.png snc_error.png snc_vless.png bg.png logo.png; do
+for f in snc_idle.png snc_connecting.png snc_connected.png snc_error.png snc_vless.png snc_wildcat.png bg.png logo.png; do
     cp "$ICON_SRC/$f" "$ASSETS_DST/$f"
 done
 

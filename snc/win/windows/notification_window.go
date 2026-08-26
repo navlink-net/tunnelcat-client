@@ -19,7 +19,8 @@ import (
 	"syscall"
 	"unsafe"
 
-	"tunnel_cat/snc/core"
+	"tunnel_cat/binlog"
+	"tunnel_cat/logevent"
 )
 
 // â”€â”€ Colour palette (SNC, VisualStyle.md Â§4.5) â”€â”€ COLORREF = 0x00BBGGRR â”€â”€â”€â”€â”€â”€
@@ -136,7 +137,7 @@ func ShowNotification(msgs []string) {
 		notifWinWidth, uintptr(height),
 		0, 0, uintptr(notifModuleHandle()), 0)
 	if hwnd == 0 {
-		core.Log.Printf("notify: CreateWindowExW failed")
+		logevent.Emit(binlog.TagSystem, logevent.EventWinWindowCreateFailed, logevent.Str(logevent.AttrWindow, "notification"))
 		return
 	}
 	defer notifUser32.NewProc("DestroyWindow").Call(hwnd)

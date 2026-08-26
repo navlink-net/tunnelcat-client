@@ -8,11 +8,13 @@ package windows
 
 import (
 	_ "embed"
+	"fmt"
 	"runtime/debug"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
-	"tunnel_cat/snc/core"
+	"tunnel_cat/binlog"
+	"tunnel_cat/logevent"
 )
 
 //go:embed assets/bg.png
@@ -55,10 +57,11 @@ type AppStatus struct {
 	Connected     bool   `json:"connected"`
 	Connecting    bool   `json:"connecting"`
 	Disconnecting bool   `json:"disconnecting"`
-	Error         bool   `json:"error"`    // last connect/login attempt failed (see TrayApp.setTrayIcon)
-	ErrorMsg      string `json:"errorMsg"` // human-readable reason, e.g. "Connect failed: dial tcp ...: timeout"
-	Mode          string `json:"mode"`     // "direct"
-	Elapsed       string `json:"elapsed"`  // "01:23:45" or ""
+	Error         bool   `json:"error"`      // last connect/login attempt failed (see TrayApp.setTrayIcon)
+	ErrorMsg      string `json:"errorMsg"`   // human-readable reason, e.g. "Connect failed: dial tcp ...: timeout"
+	Mode          string `json:"mode"`       // "direct"
+	Elapsed       string `json:"elapsed"`    // "01:23:45" or ""
+	QUICLocked    bool   `json:"quicLocked"` // WildCat is forcing QUIC blocked -- see TrayApp.IsWildcatQUICLocked
 }
 
 // AppSettings mirrors the persistent settings.
@@ -66,6 +69,24 @@ type AppSettings struct {
 	DoH       bool   `json:"doh"`
 	BlockQUIC bool   `json:"blockQUIC"`
 	Region    string `json:"region"` // "" = Auto; "RU"/"EU"/"US"/"CN"/"XX"
+	WildCat   bool   `json:"wildcat"`
+}
+
+// formatByteCount renders a cumulative byte count as a short human-readable
+// string (e.g. "1.2 MB"), binary (1024-based) units, one decimal place.
+// Used by the main window's uplink/downlink counter (see
+// AppWindow.UpdateBytes). No existing helper for this in the windows
+// package as of this writing -- checked before adding.
+func formatByteCount(n int64) string {
+	if n < 1024 {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := int64(1024), 0
+	for v := n / 1024; v >= 1024 && exp < 3; v /= 1024 {
+		div *= 1024
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(n)/float64(div), "KMGT"[exp])
 }
 
 // â”€â”€ setWindowIconFromICO â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -74,7 +95,9 @@ type AppSettings struct {
 // pngToICO). Skips the 22-byte ICONDIR + ICONDIRENTRY header.
 // Returns the newly created HICON (caller must eventually call DestroyIcon on it).
 func setWindowIconFromICO(hwnd uintptr, icoData []byte) uintptr {
-	core.Log.Printf("window: setWindowIconFromICO: icoData len=%d", len(icoData))
+	logevent.Emit(binlog.TagSystem, logevent.EventWinSetIcon,
+		logevent.Str(logevent.AttrStage, "start"),
+		logevent.Str(logevent.AttrDetail, fmt.Sprintf("len=%d", len(icoData))))
 	if len(icoData) <= 22 {
 		return 0
 	}
@@ -84,7 +107,9 @@ func setWindowIconFromICO(hwnd uintptr, icoData []byte) uintptr {
 		uintptr(len(imgData)),
 		1, 0x00030000, 32, 32, 0,
 	)
-	core.Log.Printf("window: CreateIconFromResourceEx hIcon=0x%x err=%v", hIcon, lastErr)
+	logevent.Emit(binlog.TagSystem, logevent.EventWinSetIcon,
+		logevent.Str(logevent.AttrStage, "created"),
+		logevent.Str(logevent.AttrDetail, fmt.Sprintf("hIcon=0x%x err=%v", hIcon, lastErr)))
 	if hIcon == 0 {
 		return 0
 	}
@@ -111,25 +136,31 @@ func InstallTrayLClick(fn func()) {
 		wmLButtonUp  = 0x0202
 		wmLButtonDbl = 0x0203
 	)
-	core.Log.Printf("tray: InstallTrayLClick: searching for SystrayClass window...")
+	logevent.Emit(binlog.TagSystem, logevent.EventWinTrayLclickInstall, logevent.Str(logevent.AttrStage, "searching"))
 	classPtr, _ := windows.UTF16PtrFromString("SystrayClass")
 	hwnd, _, _ := winFindWindowW.Call(uintptr(unsafe.Pointer(classPtr)), 0)
 	if hwnd == 0 {
-		core.Log.Printf("tray: SystrayClass window not found â€” left-click handler not installed")
+		logevent.Emit(binlog.TagSystem, logevent.EventWinTrayLclickInstall, logevent.Str(logevent.AttrStage, "not_found"))
 		return
 	}
-	core.Log.Printf("tray: SystrayClass hwnd=0x%x", hwnd)
+	logevent.Emit(binlog.TagSystem, logevent.EventWinTrayLclickInstall,
+		logevent.Str(logevent.AttrStage, "found"),
+		logevent.Str(logevent.AttrDetail, fmt.Sprintf("hwnd=0x%x", hwnd)))
 
 	cb := windows.NewCallback(func(h, msg, wp, lp uintptr) uintptr {
 		defer func() {
 			if r := recover(); r != nil {
-				core.Log.Printf("tray: WndProc PANIC: msg=0x%x panic=%v\n%s", msg, r, debug.Stack())
+				logevent.Emit(binlog.TagSystem, logevent.EventWinTrayLclickInstall,
+					logevent.Str(logevent.AttrStage, "panic"),
+					logevent.Str(logevent.AttrDetail, fmt.Sprintf("msg=0x%x panic=%v\n%s", msg, r, debug.Stack())))
 			}
 		}()
 		if msg == wmSystrayMsg {
-			core.Log.Printf("tray: WndProc: systray msg lp=0x%x", lp)
+			logevent.Emit(binlog.TagSystem, logevent.EventWinTrayLclickInstall,
+				logevent.Str(logevent.AttrStage, "systray_msg"),
+				logevent.Str(logevent.AttrDetail, fmt.Sprintf("lp=0x%x", lp)))
 			if lp == wmLButtonUp || lp == wmLButtonDbl {
-				core.Log.Printf("tray: left-click detected â€” calling fn")
+				logevent.Emit(binlog.TagSystem, logevent.EventWinTrayLclickInstall, logevent.Str(logevent.AttrStage, "click_detected"))
 				go fn()
 				return 0
 			}
@@ -142,7 +173,9 @@ func InstallTrayLClick(fn func()) {
 		return r
 	})
 	orig, _, lastErr := winSetWindowLongPtrW.Call(hwnd, wvGWLPWndProc, cb)
-	core.Log.Printf("tray: SetWindowLongPtrW: origProc=0x%x err=%v", orig, lastErr)
+	logevent.Emit(binlog.TagSystem, logevent.EventWinTrayLclickInstall,
+		logevent.Str(logevent.AttrStage, "subclassed"),
+		logevent.Str(logevent.AttrDetail, fmt.Sprintf("origProc=0x%x err=%v", orig, lastErr)))
 	trayLClickOrigProc = orig
 	trayLClickCB = cb
 }

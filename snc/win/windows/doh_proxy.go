@@ -33,6 +33,8 @@ import (
 	"sync"
 	"time"
 
+	"tunnel_cat/binlog"
+	"tunnel_cat/logevent"
 	"tunnel_cat/snc/core"
 )
 
@@ -88,7 +90,7 @@ func (p *DoHProxy) start() error {
 	p.conn = conn
 	p.wg.Add(1)
 	go p.serve()
-	core.Log.Printf("doh-proxy: listening on %s â€” forwarding to %s via tunnel", dohProxyListenAddr, dohProxyUpstream)
+	logevent.Emit(binlog.TagSystem, logevent.EventWinDohProxy, logevent.Str(logevent.AttrStage, "listening"))
 	return nil
 }
 
@@ -100,7 +102,7 @@ func (p *DoHProxy) stop() {
 	p.conn.Close()
 	p.wg.Wait()
 	p.conn = nil
-	core.Log.Printf("doh-proxy: stopped")
+	logevent.Emit(binlog.TagSystem, logevent.EventWinDohProxy, logevent.Str(logevent.AttrStage, "stopped"))
 }
 
 func (p *DoHProxy) serve() {
@@ -113,7 +115,9 @@ func (p *DoHProxy) serve() {
 			case <-p.stopCh:
 				return
 			default:
-				core.Log.Printf("doh-proxy: recv error: %v â€” continuing", err)
+				logevent.Emit(binlog.TagSystem, logevent.EventWinDohProxy,
+					logevent.Str(logevent.AttrStage, "recv_error"),
+					logevent.Str(logevent.AttrErr, err.Error()))
 				continue
 			}
 		}
@@ -126,14 +130,24 @@ func (p *DoHProxy) serve() {
 func (p *DoHProxy) forward(query []byte, src *net.UDPAddr) {
 	resp, err := p.query(query)
 	if err != nil {
-		core.Log.Printf("doh-proxy: forward to %s: %v", src, err)
+		logevent.Emit(binlog.TagSystem, logevent.EventWinDohProxy,
+			logevent.Str(logevent.AttrStage, "forward_failed"),
+			logevent.Str(logevent.AttrSrc, src.String()),
+			logevent.Str(logevent.AttrErr, err.Error()))
 		return
 	}
 	core.GlobalDNSCache.ParseAndLearn(resp)
 	if _, err := p.conn.WriteToUDP(resp, src); err != nil {
-		core.Log.Printf("doh-proxy: write response to %s: %v", src, err)
+		logevent.Emit(binlog.TagSystem, logevent.EventWinDohProxy,
+			logevent.Str(logevent.AttrStage, "write_failed"),
+			logevent.Str(logevent.AttrSrc, src.String()),
+			logevent.Str(logevent.AttrErr, err.Error()))
 	}
-	core.Log.Printf("doh-proxy: resolved %dB query â†’ %dB response for %s", len(query), len(resp), src)
+	logevent.Emit(binlog.TagSystem, logevent.EventWinDohProxy,
+		logevent.Str(logevent.AttrStage, "resolved"),
+		logevent.Str(logevent.AttrSrc, src.String()),
+		logevent.Int(logevent.AttrQueryBytes, int64(len(query))),
+		logevent.Int(logevent.AttrRespBytes, int64(len(resp))))
 }
 
 func (p *DoHProxy) query(msg []byte) ([]byte, error) {

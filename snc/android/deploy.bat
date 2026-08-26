@@ -15,14 +15,8 @@ setlocal EnableDelayedExpansion
 
 set SCRIPT_DIR=%~dp0
 set APK_SRC=%SCRIPT_DIR%app\build\outputs\apk\release\app-release.apk
-if "!ARBITER_URL!"=="" (
-  echo ERROR: set ARBITER_URL to your own arbiter, e.g. https://your-arbiter-host
-  exit /b 1
-)
-if "!UPLOAD_KEY!"=="" (
-  echo ERROR: set UPLOAD_KEY to your own arbiter's admin upload key
-  exit /b 1
-)
+if "!ARBITER_URL!"=="" set ARBITER_URL=https://62.238.9.103
+if "!UPLOAD_KEY!"==""  set UPLOAD_KEY=6bf6076701ab343ac8342d00f5fd7b1df5874fae307918d0b247f6a89d65fe4b
 set SKIP_BUILD=0
 
 :: VERSION is computed once here so the local artifact and the upload stamp match.

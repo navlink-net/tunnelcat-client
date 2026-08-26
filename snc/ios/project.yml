@@ -92,7 +92,7 @@ targets:
         UIBackgroundModes:
           - fetch
         BGTaskSchedulerPermittedIdentifiers:
-          - net.shortnerdcat.client.vkrefresh
+          - net.shortnerdcat.client.tokenrefresh
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: false
           UISceneConfigurations:

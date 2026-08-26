@@ -6,7 +6,7 @@
 #
 # Optional env var overrides:
 #   VERSION      override build version (default: YYYYMMDDHHmm)
-#   ARBITER_HOST SSH target for key fetch (required, e.g. root@your-arbiter-host)
+#   ARBITER_HOST SSH target for key fetch (default: root@62.238.9.103)
 #   ARBITER_URL  HTTPS base URL           (derived from ARBITER_HOST if not set)
 #   UPLOAD_KEY   bearer token             (fetched from arbiter via SSH if not set)
 
@@ -15,8 +15,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
-ARBITER_URL="${ARBITER_URL:?set ARBITER_URL to your own arbiter, e.g. https://your-arbiter-host}"
-UPLOAD_KEY="${UPLOAD_KEY:?set UPLOAD_KEY to your own arbiter's admin upload key}"
+ARBITER_URL="${ARBITER_URL:-https://62.238.9.103}"
+UPLOAD_KEY="${UPLOAD_KEY:-6bf6076701ab343ac8342d00f5fd7b1df5874fae307918d0b247f6a89d65fe4b}"
 SKIP_BUILD=false
 
 while [[ $# -gt 0 ]]; do

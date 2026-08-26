@@ -91,10 +91,6 @@ object ExcludedApps {
         "ru.sbermegamarket.sbermegamarket",     // Мегамаркет (alt package)
         "ru.megamarket.marketplace",            // Мегамаркет (current package)
         // Social / Messaging — confirmed VPN detection
-        "com.vkontakte.android",                // ВКонтакте (classic package)
-        "com.vk.vkcompose",                     // ВКонтакте (current package)
-        "ru.vk.video",                          // VK Видео
-        "ru.vk.music",                          // VK Музыка
         "ru.ok.android",                        // Одноклассники
         "ru.mail.mailapp",                      // Почта Mail.ru
         // Yandex ecosystem — confirmed VPN detection
@@ -106,8 +102,6 @@ object ExcludedApps {
         // Media — confirmed VPN detection
         "ru.kinopoisk",                         // Кинопоиск
         "ru.rutube",                            // RuTube
-        // App store
-        "ru.vk.store",                          // RuStore
         // Government / state apps
         "ru.gosuslugi.portal.android",          // Госуслуги
         "ru.max.messenger",                     // МАКС (alt package)

@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 
 	"shortnerdcat/snc/shared/theme"
 	"tunnel_cat/snc/core"
@@ -114,17 +115,17 @@ func NewSNCWindow(
 	for _, name := range []string{
 		"bg.png",
 		"illustration_idle.png", "illustration_connecting.png", "illustration_connected.png",
-		"illustration_error.png",
+		"illustration_wildcat.png", "illustration_error.png",
 		// Club-theme variants (see tunnel_cat/docs/club-membership.md) --
-		// same four states, palette-only variants selected client-side by
+		// same five states, palette-only variants selected client-side by
 		// appending "_catclub"/"_elite" to the filename (see onClubThemeUpdate
 		// in windowHTML's JS below). Registered unconditionally; a regular
 		// (non-member) user's JS just never references these URLs.
 		"illustration_idle_catclub.png", "illustration_connecting_catclub.png",
-		"illustration_connected_catclub.png",
+		"illustration_connected_catclub.png", "illustration_wildcat_catclub.png",
 		"illustration_error_catclub.png",
 		"illustration_idle_elite.png", "illustration_connecting_elite.png",
-		"illustration_connected_elite.png",
+		"illustration_connected_elite.png", "illustration_wildcat_elite.png",
 		"illustration_error_elite.png",
 	} {
 		fmt.Fprintf(os.Stderr, "tray: registering asset %q\n", name)
@@ -226,6 +227,18 @@ func (w *SNCWindow) PushClubTheme(theme, badgeText string, isAdmin, canRecommend
 	windowPushClubTheme(b)
 }
 
+// PushBytes encodes the live cumulative uplink/downlink byte counters as JSON
+// and calls window.onBytesUpdate(...) in the WebView. Called once a second
+// while connected, and once with (0, 0) on disconnect -- see the byte-ticker
+// in cmd/shortnerdcat/main_darwin.go's onConnect/onDisconnect.
+func (w *SNCWindow) PushBytes(sent, recv int64) {
+	b, _ := json.Marshal(struct {
+		Sent int64 `json:"sent"`
+		Recv int64 `json:"recv"`
+	}{Sent: sent, Recv: recv})
+	windowPushBytes(b)
+}
+
 // BuildAppMenu builds the NSApp main menu bar. Must be called after
 // NewSNCWindow and SetMenuTray. Dispatched asynchronously to the main thread,
 // so it safely enqueues after windowInit without any extra synchronisation.
@@ -238,15 +251,51 @@ func (w *SNCWindow) PushSettings(s AppSettings) {
 	b, _ := json.Marshal(s)
 	windowPushSettings(b)
 	updateReady := globalTray != nil && globalTray.IsUpdateReady()
-	windowSyncAppMenu(s.DoH, s.BlockQUIC, s.Region, updateReady)
+	quicLocked := globalTray != nil && globalTray.IsWildcatQUICLocked()
+	windowSyncAppMenu(s.DoH, s.BlockQUIC, s.Wildcat, s.Region, updateReady, quicLocked)
 }
 
 // â”€â”€ HTML / CSS / JS â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
+// resolveTTokens replaces every "{{T:key}}" occurrence in s with T(key)'s
+// result (see i18n_darwin.go / strings_darwin.go). Used by windowHTML() to
+// localize the embedded WebView UI without templating the whole string with
+// text/template -- the HTML/CSS/JS below is large and mostly non-localized
+// markup, so a minimal token scanner keeps the diff small and avoids
+// escaping concerns text/template would introduce for the inline <script>.
+func resolveTTokens(s string) string {
+	const open = "{{T:"
+	const close = "}}"
+	var b strings.Builder
+	rest := s
+	for {
+		i := strings.Index(rest, open)
+		if i < 0 {
+			b.WriteString(rest)
+			break
+		}
+		b.WriteString(rest[:i])
+		afterOpen := rest[i+len(open):]
+		j := strings.Index(afterOpen, close)
+		if j < 0 {
+			// Malformed token (missing "}}") -- emit the rest verbatim rather
+			// than looping forever or silently eating text.
+			b.WriteString(rest[i:])
+			break
+		}
+		key := afterOpen[:j]
+		b.WriteString(T(key))
+		rest = afterOpen[j+len(close):]
+	}
+	return b.String()
+}
+
 // windowHTML returns the complete UI HTML for the macOS app window.
 // Images are served via the sncasset:// custom URL scheme registered at startup.
+// User-facing text is written as "{{T:key}}" tokens resolved by
+// resolveTTokens against strings_darwin.go's stringsEN/stringsRU tables.
 func windowHTML() string {
-	return `<!DOCTYPE html>
+	return resolveTTokens(`<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -383,6 +432,23 @@ body::before{
 #status-bar.state-disconnected{background:#5b6470}
 #status-bar.state-connecting{background:#e08a2e}
 #status-bar.state-error{background:#c0392b}
+#status-bar.state-wildcat{background:#000}
+
+/* â”€â”€ Live uplink/downlink counter â”€â”€ */
+/* Sits just above #status-bar, bottom-right of the illustration. Hidden by
+   default; shown only while connected (see window.onStatusUpdate /
+   window.onBytesUpdate below) -- there is nothing meaningful to show while
+   idle/connecting/error, and the daemon stops pushing updates in that state
+   anyway (see the byte-ticker in cmd/shortnerdcat/main_darwin.go). */
+#byte-counter{
+  position:absolute;right:10px;bottom:94px;z-index:2;
+  display:none;
+  padding:3px 9px;border-radius:6px;
+  background:rgba(0,0,0,0.45);
+  color:#fff;font-size:11px;font-weight:600;letter-spacing:0.2px;
+  font-variant-numeric:tabular-nums;
+  pointer-events:none;
+}
 
 /* â”€â”€ Settings panel â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 #panel-settings{
@@ -419,8 +485,8 @@ body::before{
 <div class="app">
 
   <div class="tabs">
-    <div class="tab active" onclick="switchTab('tunnel',this)">TUNNEL</div>
-    <div class="tab"        onclick="switchTab('settings',this)">SETTINGS</div>
+    <div class="tab active" onclick="switchTab('tunnel',this)">{{T:html_tab_tunnel}}</div>
+    <div class="tab"        onclick="switchTab('settings',this)">{{T:html_tab_settings}}</div>
   </div>
 
   <div class="content">
@@ -431,61 +497,66 @@ body::before{
       <div id="tunnel-overlay">
         <div class="btn-row">
           <button id="btn-connect"    class="btn-pill"
-                  onclick="handleConnect()">Connect</button>
+                  onclick="handleConnect()">{{T:html_btn_connect}}</button>
           <button id="btn-disconnect" class="btn-pill btn-disconnect"
-                  style="display:none" onclick="handleDisconnect()">Disconnect</button>
+                  style="display:none" onclick="handleDisconnect()">{{T:html_btn_disconnect}}</button>
         </div>
       </div>
-      <div id="status-bar" class="state-disconnected">Disconnected</div>
+      <div id="byte-counter"></div>
+      <div id="status-bar" class="state-disconnected">{{T:html_status_disconnected}}</div>
     </div>
 
     <div id="panel-settings" class="panel">
       <div class="settings-section">
-        <h3>Your Location</h3>
+        <h3>{{T:html_settings_location}}</h3>
         <div class="srow">
-          <div class="srow-label">Region</div>
+          <div class="srow-label">{{T:html_region_label}}</div>
           <select class="region-sel" id="s-region" onchange="saveSettings()">
-            <option value="">Auto</option>
-            <option value="RU">Russia</option>
-            <option value="EU">Europe</option>
-            <option value="US">USA</option>
-            <option value="CN">China</option>
-            <option value="XX">Other</option>
+            <option value="">{{T:html_region_auto}}</option>
+            <option value="RU">{{T:html_region_ru}}</option>
+            <option value="EU">{{T:html_region_eu}}</option>
+            <option value="US">{{T:html_region_us}}</option>
+            <option value="CN">{{T:html_region_cn}}</option>
+            <option value="XX">{{T:html_region_other}}</option>
           </select>
         </div>
       </div>
       <div class="settings-section">
-        <h3>Connection Options</h3>
+        <h3>{{T:html_settings_connection}}</h3>
         <div class="srow">
-          <div class="srow-label">DoH &#8212; DNS over HTTPS</div>
+          <div class="srow-label">{{T:html_wildcat_label}}</div>
+          <input type="checkbox" id="s-wildcat" onchange="saveSettings()">
+        </div>
+        <div class="srow">
+          <div class="srow-label">{{T:html_doh_label}}</div>
           <input type="checkbox" id="s-doh" onchange="saveSettings()">
         </div>
         <div class="srow" id="s-block-quic-row">
-          <div class="srow-label">Disable QUIC</div>
+          <div class="srow-label">{{T:html_block_quic_label}}</div>
           <input type="checkbox" id="s-block-quic" onchange="saveSettings()">
         </div>
       </div>
       <div class="settings-section" id="club-theme-section" style="display:none">
-        <h3>Club Theme (admin preview)</h3>
+        <h3>{{T:html_club_theme_section}}</h3>
         <div class="srow">
-          <div class="srow-label">Theme</div>
+          <div class="srow-label">{{T:html_club_theme_label}}</div>
           <select class="region-sel" id="s-club-theme" onchange="submitClubThemePreview()">
-            <option value="">Regular</option>
-            <option value="catclub">Cat Club</option>
-            <option value="elite">Elite Cat Club</option>
+            <option value="">{{T:html_club_theme_regular}}</option>
+            <option value="catclub">{{T:html_club_theme_catclub}}</option>
+            <option value="elite">{{T:html_club_theme_elite}}</option>
           </select>
         </div>
       </div>
       <div class="settings-section" id="recommend-section" style="display:none">
-        <h3>Recommend new Cat Club members</h3>
+        <h3>{{T:html_recommend_section}}</h3>
         <div class="srow" style="flex-direction:column;align-items:stretch;gap:8px">
-          <input type="text" id="recommend-username" placeholder="username to recommend"
+          <input type="text" id="recommend-username" placeholder="{{T:html_recommend_placeholder}}"
                  style="background:rgba(7,9,13,0.8);border:1px solid rgba(89,200,255,0.3);
                         border-radius:6px;color:var(--text-primary);padding:7px 10px;font-size:13px;outline:none">
           <button onclick="submitRecommend()"
                   style="background:rgba(89,200,255,0.15);border:1px solid rgba(89,200,255,0.4);
                          border-radius:6px;color:var(--screen-cyan);padding:7px 10px;font-size:12px;
-                         font-weight:600;cursor:pointer">Recommend</button>
+                         font-weight:600;cursor:pointer">{{T:html_recommend_button}}</button>
           <div id="recommend-status" style="font-size:11px;color:rgba(153,162,176,0.8)"></div>
         </div>
       </div>
@@ -495,6 +566,19 @@ body::before{
 </div>
 
 <script>
+// I18N holds Go-resolved translations for strings the JS builds dynamically
+// (status-bar text, recommend confirmation) rather than embedding directly
+// in markup -- see resolveTTokens() in window_darwin.go.
+window.I18N = {
+  error:            "{{T:html_js_error}}",
+  disconnecting:    "{{T:html_js_disconnecting}}",
+  connecting:       "{{T:html_js_connecting}}",
+  connectedWildcat: "{{T:html_js_connected_wildcat}}",
+  connected:        "{{T:html_js_connected}}",
+  disconnected:     "{{T:html_js_disconnected}}",
+  recommendSentPrefix: "{{T:html_recommend_status_prefix}}"
+};
+
 function switchTab(name, el) {
   document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
   document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
@@ -507,6 +591,7 @@ function handleDisconnect() { window.webkit.messageHandlers.sncDisconnect.postMe
 
 function saveSettings() {
   window.webkit.messageHandlers.sncSetSettings.postMessage({
+    wildcat:   document.getElementById('s-wildcat').checked,
     doh:       document.getElementById('s-doh').checked,
     blockQUIC: document.getElementById('s-block-quic').checked,
     region:    document.getElementById('s-region').value,
@@ -562,9 +647,35 @@ function submitRecommend() {
   var username = input.value.trim();
   if (!username) return;
   window.webkit.messageHandlers.sncRecommend.postMessage(username);
-  status.textContent = 'Recommendation sent for ' + username + '.';
+  status.textContent = window.I18N.recommendSentPrefix + username + '.';
   input.value = '';
 }
+
+// formatBytes renders a byte count like "1.2 MB" / "45.3 MB" / "3 B".
+// Binary (1024-based) units, one decimal place above 1 KB.
+function formatBytes(n) {
+  n = n || 0;
+  var units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  var i = 0;
+  var v = n;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i++;
+  }
+  var str = i === 0 ? String(Math.round(v)) : v.toFixed(1);
+  return str + ' ' + units[i];
+}
+
+// onBytesUpdate updates the "sent / recv" counter -- pushed once a second
+// while connected by the daemon (see BytesSent/BytesRecv in macos/ipc.go).
+// The element's visibility itself is driven by onStatusUpdate below (hidden
+// outside the connected state), not by this function, so a stray late push
+// racing a disconnect can't leave it shown.
+window.onBytesUpdate = function(b) {
+  var el = document.getElementById('byte-counter');
+  if (!el) return;
+  el.textContent = '↑ ' + formatBytes(b && b.sent) + '   ↓ ' + formatBytes(b && b.recv);
+};
 
 window.onStatusUpdate = function(s) {
   window.lastStatus = s;
@@ -572,43 +683,55 @@ window.onStatusUpdate = function(s) {
   var bar  = document.getElementById('status-bar');
   var bcon = document.getElementById('btn-connect');
   var bdis = document.getElementById('btn-disconnect');
+  var byteEl = document.getElementById('byte-counter');
 
   bar.className = '';
   if (s.error) {
     bar.classList.add('state-error');
-    bar.textContent = s.errorMsg || 'Error';
+    bar.textContent = s.errorMsg || window.I18N.error;
     bcon.style.display = ''; bdis.style.display = 'none';
+    if (byteEl) byteEl.style.display = 'none';
     img.src = catAssetURL('error'); return;
   }
   if (s.disconnecting) {
     bar.classList.add('state-connecting');
-    bar.textContent = 'Disconnecting...';
+    bar.textContent = window.I18N.disconnecting;
     bcon.style.display = 'none'; bdis.style.display = 'none';
+    if (byteEl) byteEl.style.display = 'none';
     img.src = catAssetURL('connecting'); return;
   }
   if (s.connecting) {
     bar.classList.add('state-connecting');
-    bar.textContent = 'Connecting...';
+    bar.textContent = window.I18N.connecting;
     bcon.style.display = 'none'; bdis.style.display = '';
+    if (byteEl) byteEl.style.display = 'none';
     img.src = catAssetURL('connecting'); return;
   }
   if (s.connected) {
-    bar.classList.add('state-connected');
-    bar.textContent = 'Connected';
+    var isWildcat = s.mode === 'wildcat';
+    bar.classList.add(isWildcat ? 'state-wildcat' : 'state-connected');
+    bar.textContent = isWildcat ? window.I18N.connectedWildcat : window.I18N.connected;
     bcon.style.display = 'none'; bdis.style.display = '';
-    img.src = catAssetURL('connected');
+    if (byteEl) byteEl.style.display = '';
+    img.src = catAssetURL(isWildcat ? 'wildcat' : 'connected');
     return;
   }
   bar.classList.add('state-disconnected');
-  bar.textContent = 'Disconnected';
+  bar.textContent = window.I18N.disconnected;
   bcon.style.display = ''; bdis.style.display = 'none';
+  if (byteEl) byteEl.style.display = 'none';
   img.src = catAssetURL('idle');
 };
 
 window.onSettingsUpdate = function(s) {
+  document.getElementById('s-wildcat').checked    = !!s.wildcat;
   document.getElementById('s-doh').checked        = !!s.doh;
   document.getElementById('s-block-quic').checked = !!s.blockQUIC;
   document.getElementById('s-region').value       = s.region || '';
+  // WildCat forces QUIC blocked for the session -- hide the row entirely
+  // rather than just greying it (checkbox state above is left untouched,
+  // so it reads correctly again the moment WildCat releases the lock).
+  document.getElementById('s-block-quic-row').style.display = s.quicLocked ? 'none' : '';
 };
 
 // Notify Go that the page is ready so it can re-push the current status.
@@ -617,5 +740,5 @@ window.onSettingsUpdate = function(s) {
 window.webkit.messageHandlers.sncPageReady.postMessage({});
 </script>
 </body>
-</html>`
+</html>`)
 }

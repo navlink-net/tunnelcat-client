@@ -5,8 +5,10 @@
 import UIKit
 import WebKit
 
-/// In-app browser. WKWebView loads directly — traffic goes through the
-/// active VPN tunnel.
+/// In-app browser.
+///
+/// Normal mode: WKWebView loads directly — traffic goes through the active VPN tunnel.
+/// WildCat mode: same path; WildCat transport is transparent to WKWebView.
 ///
 /// Tab state is persisted to the shared App Group UserDefaults so it survives
 /// app restarts.
@@ -85,13 +87,13 @@ final class BrowserViewController: UIViewController {
 
     private func setupChrome() {
         // URL bar
-        urlBar.placeholder = "Search or enter URL"
+        urlBar.placeholder = L.t("browser.urlPlaceholder")
         urlBar.borderStyle = .roundedRect
         urlBar.backgroundColor = UIColor(white: 1, alpha: 0.08)
         urlBar.textColor = .white
         urlBar.tintColor = .systemBlue
         urlBar.attributedPlaceholder = NSAttributedString(
-            string: "Search or enter URL",
+            string: L.t("browser.urlPlaceholder"),
             attributes: [.foregroundColor: UIColor(white: 1, alpha: 0.4)])
         urlBar.keyboardType = .URL
         urlBar.autocapitalizationType = .none
@@ -192,7 +194,7 @@ final class BrowserViewController: UIViewController {
     @objc private func reloadTapped()  { webView.reload() }
 
     @objc private func tabsTapped() {
-        let alert = UIAlertController(title: "Tabs", message: nil, preferredStyle: .actionSheet)
+        let alert = UIAlertController(title: L.t("browser.tabsTitle"), message: nil, preferredStyle: .actionSheet)
 
         for (i, tab) in tabs.enumerated() {
             let label = tab.title.isEmpty ? tab.url.absoluteString : tab.title
@@ -201,15 +203,15 @@ final class BrowserViewController: UIViewController {
                 self?.switchToTab(i)
             })
         }
-        alert.addAction(UIAlertAction(title: "+ New tab", style: .default) { [weak self] _ in
+        alert.addAction(UIAlertAction(title: L.t("browser.newTab"), style: .default) { [weak self] _ in
             self?.openNewTab()
         })
         if tabs.count > 1 {
-            alert.addAction(UIAlertAction(title: "Close current tab", style: .destructive) { [weak self] _ in
+            alert.addAction(UIAlertAction(title: L.t("browser.closeCurrentTab"), style: .destructive) { [weak self] _ in
                 self?.closeCurrentTab()
             })
         }
-        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        alert.addAction(UIAlertAction(title: L.t("common.cancel"), style: .cancel))
 
         alert.popoverPresentationController?.sourceView = btnNewTab
         present(alert, animated: true)

@@ -10,7 +10,7 @@ import android.content.Intent
 import android.util.Log
 
 // BootReceiver starts SncBackgroundService automatically after device boot so
-// manifests and VK TURN credentials are populated before the user opens the app.
+// manifests and WildCat credentials are populated before the user opens the app.
 // Only starts the service if a key has been configured; no-ops otherwise.
 class BootReceiver : BroadcastReceiver() {
 
