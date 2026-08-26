@@ -18,11 +18,11 @@ enum GoCore {
     ///   connection-stats feature (see core.ConnStatsCollector).
     /// - Returns: `true` on success; `false` if the key is invalid or logging failed.
     static func start(key: String, logDir: URL, dataDir: URL,
-                      tunFD: Int32, manual: Bool) -> Bool {
+                      tunFD: Int32, wildcatMode: Bool, manual: Bool) -> Bool {
         key.withCString { cKey in
             logDir.path.withCString { cLog in
                 dataDir.path.withCString { cData in
-                    SNCStart(cKey, cLog, cData, tunFD, manual ? 1 : 0) == 0
+                    SNCStart(cKey, cLog, cData, tunFD, wildcatMode ? 1 : 0, manual ? 1 : 0) == 0
                 }
             }
         }
@@ -54,6 +54,18 @@ enum GoCore {
 
     // MARK: - Control
 
+    /// Enables or disables WildCat mode. Can be called while the tunnel is running.
+    static func setWildcat(_ enabled: Bool) {
+        SNCSetWildcat(enabled ? 1 : 0)
+    }
+
+    /// Passes a fresh access token to the WildCat credential manager.
+    /// Must be called before starting in WildCat mode, and again whenever the
+    /// token is refreshed.
+    static func setWildcatToken(_ token: String) {
+        token.withCString { SNCSetWildcatToken($0) }
+    }
+
     /// Triggers a pool rebuild (call on network interface change).
     static func reconnect() {
         SNCReconnect()
@@ -65,10 +77,26 @@ enum GoCore {
 struct TunnelStatus: Codable {
     let state: TunnelState
     let error: String?
+    /// Cumulative application-payload bytes sent/received by the Go core
+    /// process since it started (per-session, resets on extension restart --
+    /// see core.TotalBytes on the Go side). Absent/undecodable on older
+    /// payloads decodes to 0 via the defaulted init below.
+    let bytesSent: Int64
+    let bytesRecv: Int64
 
-    init(state: TunnelState, error: String? = nil) {
+    init(state: TunnelState, error: String? = nil, bytesSent: Int64 = 0, bytesRecv: Int64 = 0) {
         self.state = state
         self.error = error
+        self.bytesSent = bytesSent
+        self.bytesRecv = bytesRecv
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        state = try c.decode(TunnelState.self, forKey: .state)
+        error = try c.decodeIfPresent(String.self, forKey: .error)
+        bytesSent = try c.decodeIfPresent(Int64.self, forKey: .bytesSent) ?? 0
+        bytesRecv = try c.decodeIfPresent(Int64.self, forKey: .bytesRecv) ?? 0
     }
 }
 

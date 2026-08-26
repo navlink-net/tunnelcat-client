@@ -19,20 +19,21 @@ import (
 	"tunnel_cat/snc/core"
 )
 
-// obtainActivationKey runs the "do you have a key?" flow: existing users go
-// straight to the (unchanged) native key-entry panel; users with no key are
-// offered a direct (non-tunneled) navlink.net email/password login that
-// automatically issues a key, but only when navlink.net is actually
-// reachable — otherwise login could never succeed anyway, so we go straight
-// to manual key entry. Returns a raw activation-key string exactly as if it
-// had been typed into the key-entry panel.
+// obtainActivationKey runs the registration flow: the default screen is now
+// the credential-login panel (email/password) whenever navlink.net is
+// reachable, with a "I Have a Key" button for existing users to switch to
+// manual key entry. The old "Do you have a key?" Yes/No prompt has been
+// removed from this automatic flow (ShowHaveKeyPrompt itself is left intact
+// as dead code -- see window_darwin.go / window_cocoa.m -- in case it's
+// needed again). Returns a raw activation-key string exactly as if it had
+// been typed into the key-entry panel.
 //
 // Note: unlike Windows, the key-entry panel itself does not grow a "Login"
 // button when navlink.net is reachable (that would need extra native Cocoa
-// UI this session can't build-verify without a Mac) — "Yes, I have a key"
-// always goes straight to key entry here. The credential-login screen still
-// offers "I Have a Key" to switch the other way, so the full flow works,
-// just asymmetrically between platforms.
+// UI this session can't build-verify without a Mac) -- when navlink.net is
+// unreachable we go straight to key entry here. The credential-login screen
+// still offers "I Have a Key" to switch the other way, so the full flow
+// works, just asymmetrically between platforms.
 func obtainActivationKey(appWin *snmac.SNCWindow) (string, error) {
 	getKeyManually := func() (string, error) {
 		if appWin != nil {
@@ -43,13 +44,8 @@ func obtainActivationKey(appWin *snmac.SNCWindow) (string, error) {
 
 	if appWin == nil {
 		// No window yet (edge case during early startup) — can't show the
-		// have-key-prompt/credential-login panels, fall back to manual entry
-		// exactly as before this change.
-		return getKeyManually()
-	}
-
-	hasKey := appWin.ShowHaveKeyPrompt()
-	if hasKey {
+		// credential-login panel, fall back to manual entry exactly as
+		// before this change.
 		return getKeyManually()
 	}
 
@@ -149,6 +145,11 @@ func runTrayProcess(socketPath string, watchdogRestart bool) {
 	// Register the tray so native menu bar callbacks can reach it.
 	snmac.SetMenuTray(trayApp)
 
+	// Sync WildCat state from daemon — daemon persists it across tray restarts.
+	if init.WildcatEnabled {
+		trayApp.SetWildcatEnabled(true)
+	}
+
 	trayApp.SetShareLogsCallback(func() {
 		exec.Command("/usr/bin/open", logDir).Run() //nolint:errcheck
 	})
@@ -205,6 +206,11 @@ func runTrayProcess(socketPath string, watchdogRestart bool) {
 		fmt.Fprintf(os.Stderr, "tray: readyCb complete\n")
 	})
 
+	// Wire WildCat callback: tray â†’ daemon.
+	trayApp.SetWildcatCallback(func(enabled bool, wildcatToken string) {
+		sendCmd(snmac.IPCCmd{T: "wildcat", WildcatEnabled: enabled, WildcatToken: wildcatToken})
+	})
+
 	// Read status updates from main in background.
 	go func() {
 		for {
@@ -253,6 +259,21 @@ func runTrayProcess(socketPath string, watchdogRestart bool) {
 			case "club_theme":
 				if appWin != nil {
 					appWin.PushClubTheme(msg.ClubTheme, msg.ClubBadge, msg.IsAdmin, msg.CanRecommend)
+				}
+			case "bytes":
+				if appWin != nil {
+					appWin.PushBytes(msg.BytesSent, msg.BytesRecv)
+				}
+			case "wildcat_status":
+				// Daemon reports WildCat relay connect result.
+				// true  â†’ connected via WildCat relay (confirm checkbox)
+				// false â†’ connected via normal path (daemon may not have had a token yet)
+				//         Do NOT auto-disable checkbox â€” user explicitly enabled WildCat.
+				if msg.WildcatOK {
+					core.Log.Printf("tray: wildcat relay confirmed OK")
+					trayApp.SetWildcatEnabled(true)
+				} else {
+					core.Log.Printf("tray: wildcat relay not used this connect (checkbox stays on)")
 				}
 			}
 		}

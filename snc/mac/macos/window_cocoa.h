@@ -39,6 +39,12 @@ void snc_window_push_settings(const char *settingsJSON);
 // is confirmed.
 void snc_window_push_club_theme(const char *themeJSON);
 
+// snc_window_push_bytes evaluates window.onBytesUpdate(<bytesJSON>) in the
+// WebView. bytesJSON is {"sent":<int64>,"recv":<int64>}, the live cumulative
+// uplink/downlink byte counters (see core.TotalBytes's doc comment) -- pushed
+// once a second while connected, and once with sent=recv=0 on disconnect.
+void snc_window_push_bytes(const char *bytesJSON);
+
 // snc_window_show_key_entry shows a non-modal key-entry window (NSWindow + NSTextField).
 void snc_window_show_key_entry(void);
 
@@ -77,4 +83,4 @@ void snc_window_build_app_menu(void);
 // snc_window_sync_app_menu updates menu-item checkmarks and the Update item's
 // enabled state to match the current settings. Safe to call from any thread —
 // dispatches to the main queue internally.
-void snc_window_sync_app_menu(int doh, int quic, const char *region, int updateReady);
+void snc_window_sync_app_menu(int doh, int quic, int wildcat, const char *region, int updateReady, int quicLocked);

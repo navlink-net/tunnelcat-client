@@ -131,9 +131,42 @@ final class VPNManager {
         shared.string(forKey: SharedDefaultsKey.key)
     }
 
+    func setWildcat(_ on: Bool) {
+        log.info("setWildcat: \(on), status=\(self.connectionStatus.rawValue)")
+        shared.set(on, forKey: SharedDefaultsKey.wildcatOn)
+        if connectionStatus == .connected {
+            send(.setWildcat(on))
+        }
+    }
+
+    var wildcatEnabled: Bool {
+        shared.bool(forKey: SharedDefaultsKey.wildcatOn)
+    }
+
+    // MARK: - WildCat Token
+
+    /// Stores the WildCat access token and pushes it to the NE extension if connected.
+    /// Token expiry is set conservatively to 18 min.
+    func setWildcatToken(_ token: String) {
+        log.info("setWildcatToken: len=\(token.count), status=\(self.connectionStatus.rawValue)")
+        let expiry = Date().addingTimeInterval(18 * 60).timeIntervalSince1970
+        shared.set(token, forKey: SharedDefaultsKey.wildcatToken)
+        shared.set(expiry, forKey: SharedDefaultsKey.wildcatTokenExpiry)
+        if connectionStatus == .connected || connectionStatus == .connecting {
+            send(.setWildcatToken(token))
+        }
+    }
+
+    /// Returns the cached WildCat access token if one exists and hasn't expired, nil otherwise.
+    func storedWildcatToken() -> String? {
+        guard let token = shared.string(forKey: SharedDefaultsKey.wildcatToken), !token.isEmpty else { return nil }
+        let expiry = shared.double(forKey: SharedDefaultsKey.wildcatTokenExpiry)
+        guard expiry > 0, Date().timeIntervalSince1970 < expiry else { return nil }
+        return token
+    }
 }
 
 enum VPNError: LocalizedError {
     case notLoaded
-    var errorDescription: String? { "VPN configuration not loaded yet" }
+    var errorDescription: String? { L.t("vpn.notLoaded") }
 }

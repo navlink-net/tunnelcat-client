@@ -7,6 +7,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -23,10 +24,12 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/anacrolix/torrent/metainfo"
 	"github.com/google/uuid"
 
 	snlin "shortnerdcat/snc/linux/linux"
 	snmac "shortnerdcat/snc/mac/macos"
+	"shortnerdcat/snc/shared/keymigrate"
 	"tunnel_cat/snc/core"
 )
 
@@ -120,13 +123,23 @@ func main() {
 	debugLog(fmt.Sprintf("privilege check uid=%d", os.Getuid()))
 	if os.Getuid() != 0 {
 		socketPath := snmac.IPCSocketPath(fmt.Sprintf("%d", os.Getuid()))
-		debugLog(fmt.Sprintf("not root, checking socket %s", socketPath))
-		if snlin.IsDaemonSocketLive(socketPath) {
-			debugLog("daemon socket live, starting tray directly")
+		debugLog(fmt.Sprintf("not root, checking daemon %s", socketPath))
+		if daemonRespondsToStatus() {
+			debugLog("daemon responds to status, starting tray directly")
 			runTrayProcess(socketPath, watchdogRestart)
 			return
 		}
-		debugLog("relaunchAsRoot via pkexec")
+		// A raw socket connect (the old check here) only proves something is
+		// listening, not that it's actually processing requests -- a hung
+		// daemon whose accept loop is still alive but stuck elsewhere passed
+		// that check forever, so a user relaunch just reattached a fresh tray
+		// to the same dead backend instead of ever killing+restarting it (see
+		// killStaleProcesses/ensureSingleInstance below, on the root path
+		// relaunchAsRoot leads to). Confirmed live 2026-08-17: a client's
+		// watchdog log showed it re-attach to an old main pid on startup and
+		// then went completely silent -- exactly this failure mode. A real
+		// status round-trip catches that; a bare connect does not.
+		debugLog("daemon not responding to status â€” relaunching as root for a clean restart")
 		relaunchAsRoot()
 		return
 	}
@@ -309,6 +322,28 @@ func main() {
 	// CLI socket â€” lets non-root users query status and send commands.
 	go runCLIServer(cliSocketPath, logDir, ipc)
 
+	// Live uplink/downlink byte counters for the app window (see
+	// core.TotalBytes' doc comment: cumulative application-payload bytes
+	// sent/received by this process since it started, updated in real time
+	// by the tunnel data plane's RecordTunnelSent/RecordTunnelRecv calls in
+	// tunnel_cat/snc/core/tunnel.go -- all of which run here in the daemon,
+	// never in the tray process, since the daemon is the one holding the TUN
+	// device, SOCKS5 server, and dialers). There is no existing periodic
+	// status-push loop to piggyback on (PushStatus above is only ever called
+	// at state-transition points), so this is a new daemon-lifetime ticker,
+	// deliberately not scoped to onConnect/onDisconnect: ipc.PushBytes is a
+	// no-op while no tray is attached or nothing has been sent yet, and the
+	// window itself decides whether to display the counter based on the
+	// connected status it already tracks (see app window's onStatusUpdate).
+	go func() {
+		t := time.NewTicker(1 * time.Second)
+		defer t.Stop()
+		for range t.C {
+			sent, recv := core.TotalBytes()
+			ipc.PushBytes(sent, recv)
+		}
+	}()
+
 	// â”€â”€ 3. Discovery & auth setup â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 	adir := appDataDir()
 
@@ -326,6 +361,25 @@ func main() {
 		clubDiscOnce           sync.Once
 		adminPoller            *core.AdminStatusPoller
 		setClubThemePreview    func(theme string) // wired by initClubDiscovery; nil until first login
+
+		// torrentSlotMagnet/torrentSlotHash track the CURRENT magnet/infohash
+		// per slot (a software package slug, "manifest", or "versions") --
+		// see the Windows client's identical comment (main_windows.go) for
+		// the full rationale. Not user-facing: gated purely by the
+		// arbiter's manifest torrent_enabled flag, independent of tunnel
+		// state.
+		torrentEngine     *core.TorrentEngine
+		torrentOnce       sync.Once
+		torrentSlotMagnet = make(map[string]string)
+		torrentSlotHash   = make(map[string]metainfo.Hash)
+		torrentMu         sync.Mutex
+		torrentUpdateOnce sync.Once
+		// wireTorrent/torrentUpdater are assigned later (after adir/
+		// globalDisc/the daemon's updater are in scope); forward-declared
+		// so wireDHT's fetch callback (defined earlier than the assignment)
+		// can call wireTorrent on every manifest refresh.
+		wireTorrent    func()
+		torrentUpdater *core.Updater
 	)
 
 	pickServerURL := func(kd *core.KeyData) string {
@@ -354,6 +408,148 @@ func main() {
 			}
 		}
 		return ensureHTTPS(nodes[0])
+	}
+
+	// torrentSyncSlot brings one named slot (a software package slug,
+	// "manifest", or "versions") to the given magnet, stopping and deleting
+	// the previous torrent for that slot if its magnet changed (a new
+	// version got published) -- see the Windows client's identical
+	// function for the full rationale.
+	torrentSyncSlot := func(slot, magnet, label string) {
+		if magnet == "" || torrentEngine == nil {
+			return
+		}
+		torrentMu.Lock()
+		prevMagnet, hadPrev := torrentSlotMagnet[slot]
+		prevHash, hadHash := torrentSlotHash[slot]
+		torrentMu.Unlock()
+		if hadPrev && prevMagnet == magnet {
+			return
+		}
+		newHash, err := torrentEngine.AddMagnet(magnet)
+		if err != nil {
+			core.Log.Printf("torrent: add %s (%s): %v", label, magnet, err)
+			return
+		}
+		if hadHash {
+			if err := torrentEngine.Remove(prevHash, true); err != nil {
+				core.Log.Printf("torrent: remove stale %s: %v", label, err)
+			}
+		}
+		torrentMu.Lock()
+		torrentSlotMagnet[slot] = magnet
+		torrentSlotHash[slot] = newHash
+		torrentMu.Unlock()
+		core.Log.Printf("torrent: added %s", label)
+	}
+	// torrentCheckUpdate mirrors the Windows client's function of the same
+	// name: once the "versions" torrent (see snc-arbiter/torrent_magnets.go
+	// and deploy/torrent/sync-and-publish.sh's "versions" product) finishes
+	// downloading, checks whether the "linux" slug's version is newer than
+	// this build; if so, waits for that slug's own torrent (the published
+	// .deb -- see ApplyTorrentDownloadedDeb's doc comment for why a .deb
+	// and not a raw binary) to finish, extracts the binary from it, and
+	// fires the same torrentUpdater.OnReady callback the HTTP-delivered
+	// update path already uses -- identical update-available UX regardless
+	// of which channel delivered the bytes.
+	torrentCheckUpdate := func() {
+		if torrentEngine == nil {
+			return
+		}
+		dataDir := filepath.Join(adir, "torrents")
+		var versionsDone bool
+		for _, it := range torrentEngine.List() {
+			if it.HaveInfo && it.Name == "versions.json" && it.Done {
+				versionsDone = true
+				break
+			}
+		}
+		if !versionsDone {
+			return
+		}
+		raw, err := os.ReadFile(filepath.Join(dataDir, "versions.json"))
+		if err != nil {
+			return
+		}
+		var versions map[string]struct {
+			Available bool   `json:"available"`
+			Version   string `json:"version"`
+		}
+		if err := json.Unmarshal(raw, &versions); err != nil {
+			core.Log.Printf("torrent: parse versions.json: %v", err)
+			return
+		}
+		entry, ok := versions["linux"]
+		if !ok || !entry.Available || entry.Version == "" || entry.Version <= core.Version {
+			return
+		}
+		torrentMu.Lock()
+		wantHash, haveWant := torrentSlotHash["linux"]
+		torrentMu.Unlock()
+		if !haveWant {
+			return
+		}
+		var softwareDone bool
+		var softwareName string
+		for _, it := range torrentEngine.List() {
+			if it.InfoHash == wantHash.HexString() && it.HaveInfo && it.Done {
+				softwareDone = true
+				softwareName = it.Name
+				break
+			}
+		}
+		if !softwareDone {
+			return
+		}
+		torrentUpdateOnce.Do(func() {
+			debPath := filepath.Join(dataDir, softwareName)
+			if err := core.ApplyTorrentDownloadedDeb(debPath); err != nil {
+				core.Log.Printf("torrent: apply update failed: %v", err)
+				return
+			}
+			core.Log.Printf("torrent: update %s ready to install", entry.Version)
+			if torrentUpdater != nil && torrentUpdater.OnReady != nil {
+				torrentUpdater.OnReady(entry.Version)
+			}
+		})
+	}
+	torrentCheckMagnets := func() {
+		if globalDisc == nil || torrentEngine == nil {
+			return
+		}
+		magnets := globalDisc.TorrentMagnets()
+		for slug, m := range magnets {
+			torrentSyncSlot(slug, m, "software:"+slug)
+		}
+		torrentSyncSlot("manifest", globalDisc.ManifestTorrentMagnet(), "manifest")
+		torrentCheckUpdate()
+	}
+	wireTorrent = func() {
+		if globalDisc == nil {
+			return
+		}
+		torrentOnce.Do(func() {
+			torrentEngine = core.NewTorrentEngine(filepath.Join(adir, "torrents"))
+			if err := torrentEngine.Start(); err != nil {
+				core.Log.Printf("torrent: engine start failed: %v", err)
+				torrentEngine = nil
+				return
+			}
+			core.Log.Printf("torrent: engine started")
+			// See the Windows client's identical comment: globalDisc's
+			// magnets are only populated after its first successful fetch,
+			// which races this call -- poll independently rather than
+			// depending on any one fetch-completion hook firing again.
+			go func() {
+				t := time.NewTicker(2 * time.Minute)
+				defer t.Stop()
+				torrentCheckMagnets()
+				for range t.C {
+					torrentCheckMagnets()
+				}
+			}()
+		})
+		torrentCheckMagnets()
 	}
 
 	initDiscovery := func(srvURL string, kd *core.KeyData) {
@@ -396,6 +592,9 @@ func main() {
 				}
 			})
 			globalDisc.Start(10 * time.Minute)
+			if wireTorrent != nil {
+				wireTorrent()
+			}
 		})
 	}
 
@@ -542,6 +741,9 @@ func main() {
 		}
 		globalDisc.SetFetchCallback(func(raw []byte, ts int64) {
 			node.SetManifest(raw, ts)
+			if wireTorrent != nil {
+				wireTorrent()
+			}
 		})
 		node.SetManifestHandler(func(raw []byte) {
 			if err := globalDisc.InjectRaw(raw); err != nil {
@@ -647,6 +849,20 @@ func main() {
 		decoyMgr          *core.DecoyManager
 	)
 
+	// wildcatEnabled and wildcatToken are set via "wildcat" IPC command from the tray.
+	// Accessed only from the main IPC loop goroutine and onConnect/onDisconnect
+	// goroutines started by it â€” not concurrently.
+	var (
+		wildcatEnabled = settings.WildcatEnabled
+		wildcatToken   string
+	)
+	// wildcatEnabledAtomic mirrors wildcatEnabled for logUploader's background
+	// ticker goroutine, which is genuinely concurrent with the IPC loop (unlike
+	// the two goroutines the comment above scopes plain wildcatEnabled to) --
+	// see logUploader.Start's wildcatActive param below.
+	var wildcatEnabledAtomic atomic.Bool
+	wildcatEnabledAtomic.Store(settings.WildcatEnabled)
+
 	// Network monitor: detect gateway change (sleep/wake, WiFi handoff).
 	netMon := snlin.NewNetworkMonitor(func() {
 		core.Log.Printf("netmon: gateway changed â€” triggering reconnect")
@@ -657,7 +873,30 @@ func main() {
 
 	// â”€â”€ Auto-login with saved key â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 	if keyStr, err := snlin.LoadKey(adir); err == nil {
-		if kd, err := core.ParseKeyString(keyStr); err == nil && len(kd.Nodes()) > 0 {
+		kd, err := core.ParseKeyString(keyStr)
+		if err == nil && kd.IsLegacy() {
+			// Legacy (V1, unsigned) key found on disk: its ControlNodes/
+			// Servers list is not verifiable (see snc/shared/keymigrate's
+			// doc comment), so it must not be dialed as-is. Migrate first;
+			// on failure, treat as if no usable key were on disk at all --
+			// do NOT fall through to auto-connecting with the unverified
+			// list below.
+			core.Log.Printf("startup: legacy V1 key on disk for %s, migrating to V2", kd.Username)
+			migCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			newKeyStr, newKD, migErr := keymigrate.Migrate(migCtx, kd)
+			cancel()
+			if migErr != nil {
+				core.Log.Printf("startup: legacy key migration failed, skipping auto-connect: %v", migErr)
+				kd, err = nil, fmt.Errorf("legacy key migration failed: %w", migErr)
+			} else {
+				core.Log.Printf("startup: legacy key migrated OK, key_id=%s", newKD.KeyID)
+				if saveErr := snlin.SaveKey(adir, newKeyStr); saveErr != nil {
+					core.Log.Printf("startup: could not persist migrated key: %v", saveErr)
+				}
+				keyStr, kd = newKeyStr, newKD
+			}
+		}
+		if err == nil && len(kd.Nodes()) > 0 {
 			savedKey = kd
 			// A key's embedded ControlNodes is bootstrap-only: once a manifest
 			// has ever been cached, it is authoritative and the key's node
@@ -750,6 +989,27 @@ func main() {
 		}
 		if len(kd.Nodes()) == 0 {
 			return fmt.Errorf("key contains no server addresses")
+		}
+
+		// Legacy (V1, unsigned) key: its ControlNodes/Servers list is not
+		// verifiable (see snc/shared/keymigrate's doc comment) -- silently
+		// exchange it for a fresh, arbiter-signed V2 key using the
+		// credentials it carries, authenticated against navlink.net
+		// directly rather than anything derived from the key itself. If
+		// this fails, the key is treated as unauthenticated: we do NOT
+		// fall back to dialing its own (unverifiable) node list.
+		if kd.IsLegacy() {
+			core.Log.Printf("login: legacy V1 key detected for %s, migrating to V2", kd.Username)
+			migCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			newKeyStr, newKD, migErr := keymigrate.Migrate(migCtx, kd)
+			cancel()
+			if migErr != nil {
+				core.Log.Printf("login: legacy key migration failed: %v", migErr)
+				return fmt.Errorf("could not renew your key (please try again or contact support): %w", migErr)
+			}
+			core.Log.Printf("login: legacy key migrated OK, key_id=%s", newKD.KeyID)
+			keyStr = newKeyStr
+			kd = newKD
 		}
 
 		tryLoginAuth := func(url string) bool {
@@ -1104,7 +1364,7 @@ func main() {
 					var rtt time.Duration
 					var ok bool
 					if router.ControlTransportName(addr) == "udp" {
-						rtt, ok = core.ProbeControlUDP(addr, 4*time.Second)
+						rtt, ok = core.ProbeControlQUIC(addr, 4*time.Second)
 					} else {
 						rtt, ok = core.ProbeControlE2E(addr, 4*time.Second)
 					}
@@ -1134,13 +1394,12 @@ func main() {
 				}
 				return ri < rj
 			})
-			// Cap at 12: enough headroom to spread load across every qualifying
-			// control instead of concentrating it on whichever 2-5 happen to
-			// have the best RTT at rebuild time (see snc/core/router.go's
-			// matching minPoolControls/maxPoolControls bounds).
-			if len(viable) > 12 {
-				viable = viable[:12]
-			}
+			// Cap at 12, guaranteeing real TCP/QUIC diversity in the pool
+			// instead of a plain RTT-sort cap -- see BalanceByTransport's doc
+			// comment for why a pure RTT sort can silently fill the whole
+			// pool with one transport and leave no redundancy when it
+			// degrades.
+			viable = router.BalanceByTransport(viable, 12)
 			return viable
 		}
 
@@ -1513,19 +1772,17 @@ func main() {
 			core.Log.Printf("connect: QUIC (UDP:443) blocked")
 		}
 		// Trial (2026-08-13, rolled out to all desktop clients 2026-08-12):
-		// dedicated native-UDP dialer for general (non-DNS) UDP ASSOCIATE
-		// traffic -- voice/video call media, games, anything not otherwise
-		// DNS or bypassed. See the full rationale in socks5.RealtimeUDPDialer's
-		// doc comment (snc/core/socks5.go) and dialerFor's use of it
+		// dedicated direct-to-control dialer for general (non-DNS) UDP
+		// ASSOCIATE traffic -- voice/video call media, games, anything not
+		// otherwise DNS or bypassed. Backed by QUIC (see NewQUICRelayDialer,
+		// snc/core/quic_relay.go) rather than the old raw-SNCU native UDP
+		// path. See the full rationale in socks5.RealtimeUDPDialer's doc
+		// comment (snc/core/socks5.go) and dialerFor's use of it
 		// (snc/core/udp_assoc.go). Best-effort -- normal pool-based UDP relay
 		// (today's behavior) is exactly what happens if this fails, nothing
 		// blocks on it.
-		if udpConn, uerr := core.NewUDPControlConn(strings.TrimPrefix(effectiveURL, "https://")); uerr == nil {
-			socks5.RealtimeUDPDialer = core.NewUDPRelayDialer(udpConn, dialer.Auth())
-			core.Log.Printf("connect: realtime UDP trial dialer ready via %s", effectiveURL)
-		} else {
-			core.Log.Printf("connect: realtime UDP trial dialer unavailable (%v) -- falling back to pool", uerr)
-		}
+		socks5.RealtimeUDPDialer = core.NewQUICRelayDialer(strings.TrimPrefix(effectiveURL, "https://"), dialer.Auth())
+		core.Log.Printf("connect: realtime UDP trial dialer ready via %s", effectiveURL)
 		go socks5.Serve(socksLn) //nolint:errcheck
 
 		if poolRefreshStop != nil {
@@ -1636,7 +1893,7 @@ func main() {
 				return dialerPool.Pick()
 			},
 			func() bool {
-				return false
+				return wildcatEnabledAtomic.Load()
 			},
 		)
 
@@ -1656,7 +1913,7 @@ func main() {
 				return dialerPool.Pick()
 			},
 			func() bool {
-				return false
+				return wildcatEnabledAtomic.Load()
 			},
 		)
 
@@ -1730,8 +1987,12 @@ func main() {
 			ipc.PushUpdate(v)
 		}
 		updater.Start()
+		torrentUpdater = updater
 
 		core.Log.Printf("connected: srvURL=%s region=%q", serverURL, settings.PreferredRegion)
+		// This is the non-WildCat connect path -- the WildCat branch further up
+		// this function returns before ever reaching here (see its own
+		// IncConnect/StartWildcatSession calls).
 		connStatsCollector.IncConnect(!autoReconnect)
 		return nil
 	}
@@ -1854,6 +2115,7 @@ func main() {
 					ipc.SendInit(core.Version, logDir,
 						initialLogin, autoConnect,
 						settings.DOHEnabled, initBlockQUIC,
+						settings.WildcatEnabled,
 						settings.PreferredRegion)
 				} else if prev != nil && ipcSession != nil {
 					sess, sock := ipcSession, ipcSocket
@@ -1953,6 +2215,17 @@ func main() {
 					cmd.BlockQUIC, cmd.Region, cmd.DOH)
 				onBlockQUICChange(cmd.BlockQUIC)
 				onRegionChange(cmd.Region)
+
+			case "wildcat":
+				core.Log.Printf("ipc: wildcat enabled=%v tokenLen=%d", cmd.WildcatEnabled, len(cmd.WildcatToken))
+				wildcatEnabled = cmd.WildcatEnabled
+				wildcatEnabledAtomic.Store(cmd.WildcatEnabled)
+				if cmd.WildcatToken != "" {
+					wildcatToken = cmd.WildcatToken
+				}
+				settings.WildcatEnabled = cmd.WildcatEnabled
+				saveClientSettings(adir, settings)
+				// WildCat switches the underlying transport â€” reconnect to apply.
 
 			case "quit":
 				// Tray user clicked Quit. Write clean-shutdown flag so the
@@ -2135,6 +2408,7 @@ type clientSettings struct {
 	DOHEnabled      bool   `json:"doh_enabled"`
 	BlockQUIC       *bool  `json:"block_quic,omitempty"`
 	PreferredRegion string `json:"preferred_region,omitempty"`
+	WildcatEnabled  bool   `json:"wildcat_enabled,omitempty"`
 }
 
 func loadClientSettings(dir string) clientSettings {
@@ -2248,6 +2522,27 @@ type cliResponse struct {
 	Elapsed string `json:"elapsed,omitempty"`
 	LogDir  string `json:"log_dir,omitempty"`
 	Latest  string `json:"latest,omitempty"`
+}
+
+// daemonRespondsToStatus reports whether a daemon is not just listening on
+// cliSocketPath but actually answers a "status" request within a short
+// deadline -- the real health check that replaced a bare socket-connect
+// test at the caller (see its doc comment for why the difference matters).
+func daemonRespondsToStatus() bool {
+	c, err := net.DialTimeout("unix", cliSocketPath, 500*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	defer c.Close()
+	c.SetDeadline(time.Now().Add(1500 * time.Millisecond)) //nolint:errcheck
+	if err := json.NewEncoder(c).Encode(cliRequest{T: "status"}); err != nil {
+		return false
+	}
+	var resp cliResponse
+	if err := json.NewDecoder(c).Decode(&resp); err != nil {
+		return false
+	}
+	return resp.OK
 }
 
 // runCLIClient sends a command to the running daemon's CLI socket and prints

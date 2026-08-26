@@ -21,6 +21,7 @@
     <string name="status_key_denied">⚠ Key Denied</string>
     <string name="notification_text_key_denied">Key denied — check your subscription</string>
     <string name="error_vpn_permission_revoked">VPN permission was revoked — reconnect to grant it again</string>
+    <string name="error_wildcat_reauth_required">WildCat session expired — please log in again</string>
     <string name="error_other_vpn_active">Another VPN is active on this device — disconnect it first</string>
     <string name="notification_title">ShortNerdCat VPN</string>
     <string name="notification_text">Protecting your connection</string>
@@ -49,6 +50,7 @@
     <string name="apps_filter_hint">Filter apps…</string>
     <string name="apps_select_all">Select all</string>
     <string name="apps_deselect_all">Deselect all</string>
+    <string name="wildcat_mode">WildCat mode</string>
     <string name="disable_ipv6">Disable IPv6</string>
     <string name="disable_udp_tunnel">Disable UDP tunnel</string>
     <string name="disable_quic">Disable QUIC</string>
@@ -70,4 +72,27 @@
     <string name="browse_address_hint">Enter URL…</string>
     <string name="browse_new_tab">+ New Tab</string>
     <string name="browse_close_tab">Close Tab</string>
+    <string name="banner_wildcat_chrome">⚠ WildCat mode is active. Use the Browse tab for best results.</string>
+    <string name="wildcat_login_failed">Login failed — WildCat mode not enabled</string>
+    <string name="ok">OK</string>
+    <string name="cancel">Cancel</string>
+    <string name="logout_confirm_message">Remove your SNC key from this device?</string>
+    <string name="logout_remove">Remove</string>
+    <string name="err_enter_key">Please enter a key</string>
+    <string name="err_enter_email_password">Please enter email and password</string>
+    <string name="err_login_failed">Login failed: %1$s</string>
+    <string name="err_fetch_key_failed">Failed to fetch key: %1$s</string>
+    <string name="err_could_not_read_image">Could not read image</string>
+    <string name="err_no_qr_found">No QR code found in image</string>
+    <string name="err_generic">Error: %1$s</string>
+    <string name="err_empty_key_received">Empty key received</string>
+    <string name="key_saved_tap_connect">Key saved — tap Connect</string>
+    <string name="scan_qr_prompt">Scan SNC key QR code</string>
+    <string name="wildcat_ribbon_text">Wildcat: limited abilities for heavy duty</string>
+    <string name="status_connected_wildcat">● Connected (WildCat)</string>
+    <string name="wildcat_warning_title">WildCat mode</string>
+    <string name="wildcat_warning_message">WildCat mode routes your traffic through a covert video-call relay to bypass deep packet inspection. It\'s meant only for use while traffic whitelists are active on our network — it is typically slower and less reliable than the standard tunnel, so don\'t turn it on unless whitelists are enabled, and turn it back off once they\'re disabled again.</string>
+    <string name="no_logs_found">No logs found</string>
+    <string name="share_snc_logs_chooser">Share SNC logs</string>
+    <string name="downloading_file">Downloading %1$s</string>
 </resources>

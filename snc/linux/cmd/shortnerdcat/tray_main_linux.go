@@ -24,10 +24,10 @@ import (
 // It connects to the IPC socket, creates TrayApp, and drives the systray UI.
 func runTrayProcess(socketPath string, watchdogRestart bool) {
 	// Force software rendering for every WebKit2GTK view this process ever
-	// creates (the app window). Must be set before WebKit's process-wide
-	// GL/compositing setup runs, which happens the moment systray.Run
-	// (below) initializes GTK -- setting it here, first thing in this
-	// dedicated --tray process, guarantees that.
+	// creates (the app window). Must be set before WebKit's
+	// process-wide GL/compositing setup runs, which happens the moment
+	// systray.Run (below) initializes GTK -- setting it here, first thing in
+	// this dedicated --tray process, guarantees that.
 	//
 	// Repeated support reports (Aug 2026): on some Xubuntu/XFCE machines
 	// (typically VMs or older Mesa/software-GL setups), WebKit's accelerated
@@ -86,16 +86,21 @@ func runTrayProcess(socketPath string, watchdogRestart bool) {
 		sendCmd(snmac.IPCCmd{T: "settings", Region: r, DOH: trayApp.IsDNSOverHTTPSEnabled()})
 	}
 
+	onWildcatChange := func(enabled bool) {
+		sendCmd(snmac.IPCCmd{T: "wildcat", WildcatEnabled: enabled})
+	}
+
 	trayApp = snlin.NewTrayApp(
 		initMsg.Version,
 		initMsg.InitLogin,
 		initMsg.AutoConnect,
 		initMsg.DOH,
 		initMsg.BlockQUIC,
+		initMsg.WildcatEnabled,
 		initMsg.Region,
 		onLogin, onLogout, onConnect, onDisconnect,
 		nil, // onDNSOverHTTPSChange â€” sent via settings cmd
-		onBlockQUICChange, onRegionChange,
+		onBlockQUICChange, onWildcatChange, onRegionChange,
 	)
 
 	trayApp.SetShareLogsCallback(func() {
@@ -110,6 +115,10 @@ func runTrayProcess(socketPath string, watchdogRestart bool) {
 		OnConnect:    func() { sendCmd(snmac.IPCCmd{T: "connect"}) },
 		OnDisconnect: func() { sendCmd(snmac.IPCCmd{T: "disconnect"}) },
 		OnSettings: func(s snlin.AppSettings) {
+			if s.WildCat != trayApp.IsWildcatEnabled() {
+				onWildcatChange(s.WildCat)
+			}
+			// All other settings go through the "settings" IPC command.
 			sendCmd(snmac.IPCCmd{
 				T:         "settings",
 				DOH:       s.DoH,
@@ -180,7 +189,7 @@ func runTrayProcess(socketPath string, watchdogRestart bool) {
 
 	trayApp.SetReadyCallback(func() {
 		if !watchdogRestart {
-			snlin.ShowNotification("ShortNerdCat", "v"+initMsg.Version+" started")
+			snlin.ShowNotification("ShortNerdCat", "v"+initMsg.Version+snlin.T("notify_started_suffix"))
 		}
 		trayApp.TriggerLoginIfNeeded()
 	})
@@ -226,9 +235,20 @@ func runTrayProcess(socketPath string, watchdogRestart bool) {
 				core.Log.Printf("tray: received reconnect from daemon")
 				trayApp.TriggerReconnect()
 
+			case "wildcat_status":
+				if !msg.WildcatOK {
+					core.Log.Printf("tray: WildCat connect failed â€” reverting checkbox")
+					trayApp.SetWildcatChecked(false)
+				}
+
 			case "club_theme":
 				if appWin != nil {
 					appWin.PushClubTheme(msg.ClubTheme, msg.ClubBadge, msg.IsAdmin, msg.CanRecommend)
+				}
+
+			case "bytes":
+				if appWin != nil {
+					appWin.PushBytes(msg.BytesSent, msg.BytesRecv)
 				}
 			}
 		}

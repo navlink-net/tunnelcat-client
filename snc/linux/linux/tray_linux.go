@@ -72,6 +72,7 @@ type TrayApp struct {
 
 	dohEnabled       bool
 	blockQUICEnabled bool
+	wildcatEnabled   bool
 	preferredRegion  string
 
 	onLogin              func() error
@@ -80,6 +81,7 @@ type TrayApp struct {
 	onDisconnect         func(autoReconnect bool)
 	onDNSOverHTTPSChange func(bool)
 	onBlockQUICChange    func(bool)
+	onWildcatChange      func(bool)
 	onRegionChange       func(string)
 	onStatusChange       func()
 	onBeforeQuit         func()
@@ -92,6 +94,7 @@ type TrayApp struct {
 	mDisconnect    *systray.MenuItem
 	mDNSOverHTTPS  *systray.MenuItem
 	mBlockQUIC     *systray.MenuItem
+	mWildcat       *systray.MenuItem
 	mRegion        *systray.MenuItem
 	mRegionAuto    *systray.MenuItem
 	mRegionRussia  *systray.MenuItem
@@ -115,6 +118,7 @@ func NewTrayApp(
 	autoConnect bool,
 	dohEnabled bool,
 	blockQUICEnabled bool,
+	wildcatEnabled bool,
 	preferredRegion string,
 	onLogin func() error,
 	onLogout func(),
@@ -122,6 +126,7 @@ func NewTrayApp(
 	onDisconnect func(autoReconnect bool),
 	onDNSOverHTTPSChange func(bool),
 	onBlockQUICChange func(bool),
+	onWildcatChange func(bool),
 	onRegionChange func(string),
 ) *TrayApp {
 	return &TrayApp{
@@ -130,6 +135,7 @@ func NewTrayApp(
 		autoConnect:          autoConnect,
 		dohEnabled:           dohEnabled,
 		blockQUICEnabled:     blockQUICEnabled,
+		wildcatEnabled:       wildcatEnabled,
 		preferredRegion:      preferredRegion,
 		onLogin:              onLogin,
 		onLogout:             onLogout,
@@ -137,6 +143,7 @@ func NewTrayApp(
 		onDisconnect:         onDisconnect,
 		onDNSOverHTTPSChange: onDNSOverHTTPSChange,
 		onBlockQUICChange:    onBlockQUICChange,
+		onWildcatChange:      onWildcatChange,
 		onRegionChange:       onRegionChange,
 		reconnectCh:          make(chan struct{}, 1),
 		connectCh:            make(chan struct{}, 1),
@@ -169,8 +176,47 @@ func (a *TrayApp) IsBlockQUICEnabled() bool {
 	return a.mBlockQUIC.Checked()
 }
 
-// refreshBlockQUICVisibility shows the "Disable QUIC" checkbox while logged
-// in (a no-op placeholder retained so callers don't need to special-case it).
+// IsWildcatEnabled reports whether WildCat mode is currently enabled.
+func (a *TrayApp) IsWildcatEnabled() bool {
+	if a.mWildcat == nil {
+		return a.wildcatEnabled
+	}
+	return a.mWildcat.Checked()
+}
+
+// SetWildcatChecked forces the WildCat checkbox to checked/unchecked without
+// triggering the callback (used to revert on a failed connect attempt).
+func (a *TrayApp) SetWildcatChecked(v bool) {
+	a.mu.Lock()
+	a.wildcatEnabled = v
+	a.mu.Unlock()
+	if a.mWildcat == nil {
+		return
+	}
+	if v {
+		a.mWildcat.Check()
+	} else {
+		a.mWildcat.Uncheck()
+	}
+	a.refreshBlockQUICVisibility()
+}
+
+// IsWildcatQUICLocked reports whether WildCat mode is currently forcing QUIC
+// blocked, for the active/pending session. True only while a WildCat
+// connection is actually connecting or connected -- unblocked UDP:443 QUIC
+// could leak traffic straight past the WildCat relay. The underlying
+// Disable QUIC preference is never touched by this -- callers hide the
+// checkbox instead, so un-hiding it later shows exactly the state it was in
+// before WildCat took over.
+func (a *TrayApp) IsWildcatQUICLocked() bool {
+	a.mu.Lock()
+	active := a.connected || a.connecting
+	a.mu.Unlock()
+	return active && a.IsWildcatEnabled()
+}
+
+// refreshBlockQUICVisibility hides the "Disable QUIC" checkbox while
+// IsWildcatQUICLocked, and shows it again otherwise.
 func (a *TrayApp) refreshBlockQUICVisibility() {
 	if a.mBlockQUIC == nil {
 		return
@@ -181,7 +227,11 @@ func (a *TrayApp) refreshBlockQUICVisibility() {
 	if !loggedIn {
 		return // login/logout flow already hides/shows it directly
 	}
-	a.mBlockQUIC.Show()
+	if a.IsWildcatQUICLocked() {
+		a.mBlockQUIC.Hide()
+	} else {
+		a.mBlockQUIC.Show()
+	}
 }
 
 // setTrayIcon sets the tray icon and records errMsg as the current error
@@ -195,6 +245,9 @@ func (a *TrayApp) setTrayIcon(icon []byte, errMsg string) {
 }
 
 func (a *TrayApp) connectedIcon() []byte {
+	if a.IsWildcatEnabled() {
+		return readAsset("snc_wildcat.png")
+	}
 	return readAsset("snc_connected.png")
 }
 
@@ -285,9 +338,11 @@ func (a *TrayApp) GetAppStatus() AppStatus {
 // GetAppSettings returns the current settings.
 func (a *TrayApp) GetAppSettings() AppSettings {
 	return AppSettings{
-		DoH:       a.IsDNSOverHTTPSEnabled(),
-		BlockQUIC: a.IsBlockQUICEnabled(),
-		Region:    a.PreferredRegion(),
+		DoH:        a.IsDNSOverHTTPSEnabled(),
+		BlockQUIC:  a.IsBlockQUICEnabled(),
+		Region:     a.PreferredRegion(),
+		WildCat:    a.IsWildcatEnabled(),
+		QUICLocked: a.IsWildcatQUICLocked(),
 	}
 }
 
@@ -345,7 +400,7 @@ func (a *TrayApp) ClearAuthWarning() {
 		return
 	}
 	a.setTrayIcon(a.connectedIcon(), "")
-	systray.SetTooltip("ShortNerdCat â€” Connected")
+	systray.SetTooltip("ShortNerdCat â€” " + T("status_connected"))
 }
 
 // ApplyIPCStatus updates tray icon/state from a status message received over IPC.
@@ -357,7 +412,7 @@ func (a *TrayApp) ApplyIPCStatus(state, msg string) {
 		if msg != "" {
 			systray.SetTooltip("ShortNerdCat â€” " + msg)
 		} else {
-			systray.SetTooltip("ShortNerdCat â€” Connectingâ€¦")
+			systray.SetTooltip("ShortNerdCat â€” " + T("status_connecting"))
 		}
 		a.mu.Lock()
 		a.connecting = true
@@ -452,8 +507,8 @@ func (a *TrayApp) ApplyIPCStatus(state, msg string) {
 		}
 		a.mu.Unlock()
 		a.callStatusChange()
-		a.setTrayIcon(readAsset("snc_error.png"), "Login error â€” your key was rejected")
-		systray.SetTooltip("ShortNerdCat â€” Login error")
+		a.setTrayIcon(readAsset("snc_error.png"), T("login_error_key_rejected"))
+		systray.SetTooltip("ShortNerdCat â€” " + T("status_login_error"))
 		a.mDisconnect.Hide()
 		a.mConnect.Hide()
 		// Keep mLogin visible in case the user cancels the dialog below --
@@ -461,7 +516,7 @@ func (a *TrayApp) ApplyIPCStatus(state, msg string) {
 		// without this a cancelled/failed retry would leave no menu item
 		// able to get back in.
 		a.mLogin.Show()
-		ShowNotification("ShortNerdCat â€” Login error", "Your key was rejected by the server and can no longer be used. Please log in again.")
+		ShowNotification("ShortNerdCat â€” "+T("notify_login_error_title"), T("notify_login_error_body"))
 		a.mu.Lock()
 		a.loggedIn = false
 		a.mu.Unlock()
@@ -479,6 +534,7 @@ func (a *TrayApp) ApplyIPCStatus(state, msg string) {
 		a.mConnect.Show()
 		a.mDNSOverHTTPS.Show()
 		a.mBlockQUIC.Show()
+		a.mWildcat.Show()
 		a.mRegion.Show()
 
 	case "logged_out":
@@ -493,12 +549,13 @@ func (a *TrayApp) ApplyIPCStatus(state, msg string) {
 		a.mu.Unlock()
 		a.callStatusChange()
 		a.setTrayIcon(readAsset("snc_idle.png"), "")
-		systray.SetTooltip("ShortNerdCat â€” not logged in")
+		systray.SetTooltip("ShortNerdCat â€” " + T("status_not_logged_in"))
 		a.mConnect.Hide()
 		a.mDisconnect.Hide()
 		a.mLogout.Hide()
 		a.mDNSOverHTTPS.Hide()
 		a.mBlockQUIC.Hide()
+		a.mWildcat.Hide()
 		a.mRegion.Hide()
 		a.mLogin.Show()
 	}
@@ -519,28 +576,29 @@ func (a *TrayApp) onReady() {
 	a.setTrayIcon(readAsset("snc_idle.png"), "")
 	systray.SetTooltip("ShortNerdCat")
 
-	a.mLogin = systray.AddMenuItem("Login", "Enter activation key")
-	a.mLogout = systray.AddMenuItem("Logout", "Log out")
+	a.mLogin = systray.AddMenuItem(T("menu_login_title"), T("menu_login_tooltip"))
+	a.mLogout = systray.AddMenuItem(T("menu_logout_title"), T("menu_logout_tooltip"))
 	systray.AddSeparator()
-	a.mConnect = systray.AddMenuItem("Connect", "Start the VPN tunnel")
-	a.mDisconnect = systray.AddMenuItem("Disconnect", "Stop the VPN tunnel")
+	a.mConnect = systray.AddMenuItem(T("menu_connect_title"), T("menu_connect_tooltip"))
+	a.mDisconnect = systray.AddMenuItem(T("menu_disconnect_title"), T("menu_disconnect_tooltip"))
 	systray.AddSeparator()
-	a.mDNSOverHTTPS = systray.AddMenuItemCheckbox("DNS over HTTPS", "Route DNS through tunnel â€” prevents ISP DNS interference", a.dohEnabled)
-	a.mBlockQUIC = systray.AddMenuItemCheckbox("Disable QUIC", "Block QUIC/HTTP3 (UDP:443) â€” improves video on congested connections", a.blockQUICEnabled)
-	a.mRegion = systray.AddMenuItem("Region: "+regionName(a.preferredRegion), "Select your region for in-country routing")
-	a.mRegionAuto = a.mRegion.AddSubMenuItemCheckbox("Auto", "Detect region automatically", a.preferredRegion == "")
-	a.mRegionRussia = a.mRegion.AddSubMenuItemCheckbox("Russia", "Russia", a.preferredRegion == "RU")
-	a.mRegionEurope = a.mRegion.AddSubMenuItemCheckbox("Europe", "Europe", a.preferredRegion == "EU")
-	a.mRegionUSA = a.mRegion.AddSubMenuItemCheckbox("USA", "United States", a.preferredRegion == "US")
-	a.mRegionChina = a.mRegion.AddSubMenuItemCheckbox("China", "China", a.preferredRegion == "CN")
-	a.mRegionOther = a.mRegion.AddSubMenuItemCheckbox("Other", "Other / no specific region", a.preferredRegion == "XX")
+	a.mDNSOverHTTPS = systray.AddMenuItemCheckbox(T("menu_doh_title"), T("menu_doh_tooltip"), a.dohEnabled)
+	a.mBlockQUIC = systray.AddMenuItemCheckbox(T("menu_block_quic_title"), T("menu_block_quic_tooltip"), a.blockQUICEnabled)
+	a.mWildcat = systray.AddMenuItemCheckbox(T("menu_wildcat_title"), T("menu_wildcat_tooltip"), a.wildcatEnabled)
+	a.mRegion = systray.AddMenuItem(T("menu_region_prefix")+regionName(a.preferredRegion), T("menu_region_tooltip"))
+	a.mRegionAuto = a.mRegion.AddSubMenuItemCheckbox(T("region_auto"), T("region_auto_tooltip"), a.preferredRegion == "")
+	a.mRegionRussia = a.mRegion.AddSubMenuItemCheckbox(T("region_russia"), T("region_russia"), a.preferredRegion == "RU")
+	a.mRegionEurope = a.mRegion.AddSubMenuItemCheckbox(T("region_europe"), T("region_europe"), a.preferredRegion == "EU")
+	a.mRegionUSA = a.mRegion.AddSubMenuItemCheckbox(T("region_usa"), T("region_usa_full"), a.preferredRegion == "US")
+	a.mRegionChina = a.mRegion.AddSubMenuItemCheckbox(T("region_china"), T("region_china"), a.preferredRegion == "CN")
+	a.mRegionOther = a.mRegion.AddSubMenuItemCheckbox(T("region_other"), T("region_other_tooltip"), a.preferredRegion == "XX")
 	systray.AddSeparator()
-	a.mOpen = systray.AddMenuItem("Open Window", "Open the Tunnel Cat control window")
-	a.mShareLogs = systray.AddMenuItem("Open Log Directory", "Open the log folder")
-	a.mAbout = systray.AddMenuItem("About Tunnel Cat", "Show version information")
-	a.mUpdate = systray.AddMenuItem("Update available", "Install downloaded update and restart")
+	a.mOpen = systray.AddMenuItem(T("menu_open_title"), T("menu_open_tooltip"))
+	a.mShareLogs = systray.AddMenuItem(T("menu_sharelogs_title"), T("menu_sharelogs_tooltip"))
+	a.mAbout = systray.AddMenuItem(T("menu_about_title"), T("menu_about_tooltip"))
+	a.mUpdate = systray.AddMenuItem(T("menu_update_title"), T("menu_update_tooltip"))
 	a.mUpdate.Hide()
-	mQuit := systray.AddMenuItem("Quit ShortNerdCat", "")
+	mQuit := systray.AddMenuItem(T("menu_quit_title"), "")
 
 	if a.loggedIn {
 		a.mLogin.Hide()
@@ -551,9 +609,10 @@ func (a *TrayApp) onReady() {
 		a.mDisconnect.Hide()
 		a.mDNSOverHTTPS.Hide()
 		a.mBlockQUIC.Hide()
+		a.mWildcat.Hide()
 		a.mRegion.Hide()
 		a.setTrayIcon(readAsset("snc_error.png"), "")
-		systray.SetTooltip("ShortNerdCat â€” not logged in")
+		systray.SetTooltip("ShortNerdCat â€” " + T("status_not_logged_in"))
 	}
 
 	if !a.loggedIn {
@@ -621,6 +680,19 @@ func (a *TrayApp) onReady() {
 					a.onBlockQUICChange(a.mBlockQUIC.Checked())
 				}
 
+			case <-a.mWildcat.ClickedCh:
+				core.Log.Printf("tray: user toggled WildCat (was checked=%v)", a.mWildcat.Checked())
+				if a.mWildcat.Checked() {
+					a.mWildcat.Uncheck()
+				} else {
+					a.mWildcat.Check()
+				}
+				core.Log.Printf("tray: WildCat now=%v", a.mWildcat.Checked())
+				a.refreshBlockQUICVisibility()
+				if a.onWildcatChange != nil {
+					a.onWildcatChange(a.mWildcat.Checked())
+				}
+
 			case <-a.mRegionAuto.ClickedCh:
 				a.setRegion("", a.mRegionAuto)
 			case <-a.mRegionRussia.ClickedCh:
@@ -672,7 +744,7 @@ func (a *TrayApp) onReady() {
 					fn()
 				}
 
-				systray.SetTooltip("ShortNerdCat â€” Quittingâ€¦")
+				systray.SetTooltip("ShortNerdCat â€” " + T("status_quitting"))
 				blinkStop := make(chan struct{})
 				go func() {
 					dim := true
@@ -725,8 +797,8 @@ func (a *TrayApp) doLogin() {
 		// Either way: no error icon â€” just wait.
 		if err.Error() != "login cancelled" && err.Error() != "key entry in progress" {
 			msg := core.FriendlyConnectError(err)
-			a.setTrayIcon(readAsset("snc_error.png"), "Login failed: "+msg)
-			systray.SetTooltip("ShortNerdCat â€” login failed: " + msg)
+			a.setTrayIcon(readAsset("snc_error.png"), T("login_failed_prefix_cap")+msg)
+			systray.SetTooltip("ShortNerdCat â€” " + T("login_failed_prefix_low") + msg)
 		}
 		return
 	}
@@ -740,6 +812,7 @@ func (a *TrayApp) doLogin() {
 	a.mConnect.Show()
 	a.mDNSOverHTTPS.Show()
 	a.mBlockQUIC.Show()
+	a.mWildcat.Show()
 	a.mRegion.Show()
 }
 
@@ -753,12 +826,13 @@ func (a *TrayApp) doLogout() {
 	a.loggedIn = false
 	a.mu.Unlock()
 	a.setTrayIcon(readAsset("snc_idle.png"), "")
-	systray.SetTooltip("ShortNerdCat â€” not logged in")
+	systray.SetTooltip("ShortNerdCat â€” " + T("status_not_logged_in"))
 	a.mConnect.Hide()
 	a.mDisconnect.Hide()
 	a.mLogout.Hide()
 	a.mDNSOverHTTPS.Hide()
 	a.mBlockQUIC.Hide()
+	a.mWildcat.Hide()
 	a.mRegion.Hide()
 	a.mLogin.Show()
 }
@@ -779,7 +853,7 @@ func (a *TrayApp) doConnect(autoReconnect bool) {
 	a.mu.Unlock()
 	a.callStatusChange()
 	a.setTrayIcon(readAsset("snc_connecting.png"), "")
-	systray.SetTooltip("ShortNerdCat â€” Connectingâ€¦")
+	systray.SetTooltip("ShortNerdCat â€” " + T("status_connecting"))
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -815,8 +889,8 @@ func (a *TrayApp) doConnect(autoReconnect bool) {
 			return
 		}
 		msg := core.FriendlyConnectError(connectErr)
-		a.setTrayIcon(readAsset("snc_error.png"), "Connect failed: "+msg)
-		systray.SetTooltip("ShortNerdCat â€” Error: " + msg)
+		a.setTrayIcon(readAsset("snc_error.png"), T("connect_failed_prefix")+msg)
+		systray.SetTooltip("ShortNerdCat â€” " + T("error_prefix") + msg)
 		a.mConnect.Show()
 		a.scheduleRetry()
 		return
@@ -872,7 +946,7 @@ func (a *TrayApp) doDisconnect(autoReconnect bool) {
 			a.mu.Unlock()
 			core.Log.Printf("disconnect: connect in progress â€” setting disconnectPending (reconnect=%v)", autoReconnect)
 			a.mDisconnect.Hide()
-			systray.SetTooltip("ShortNerdCat â€” Cancellingâ€¦")
+			systray.SetTooltip("ShortNerdCat â€” " + T("status_cancelling"))
 			a.callStatusChange()
 			return
 		}
@@ -892,13 +966,14 @@ func (a *TrayApp) doDisconnect(autoReconnect bool) {
 
 	if !quitting {
 		a.setTrayIcon(readAsset("snc_connecting.png"), "")
-		systray.SetTooltip("ShortNerdCat â€” Disconnectingâ€¦")
+		systray.SetTooltip("ShortNerdCat â€” " + T("status_disconnecting"))
 	}
 	a.mConnect.Hide()
 	a.mDisconnect.Hide()
 	a.mLogout.Hide()
 	a.mDNSOverHTTPS.Hide()
 	a.mBlockQUIC.Hide()
+	a.mWildcat.Hide()
 	a.mRegion.Hide()
 
 	disconnDone := make(chan struct{})
@@ -927,6 +1002,7 @@ func (a *TrayApp) doDisconnect(autoReconnect bool) {
 			a.mLogout.Show()
 			a.mDNSOverHTTPS.Show()
 			a.mBlockQUIC.Show()
+			a.mWildcat.Show()
 			a.mRegion.Show()
 		}
 	}
@@ -1001,7 +1077,7 @@ func (a *TrayApp) setRegion(code string, selected *systray.MenuItem) {
 	a.mu.Lock()
 	a.preferredRegion = code
 	a.mu.Unlock()
-	a.mRegion.SetTitle("Region: " + regionName(code))
+	a.mRegion.SetTitle(T("menu_region_prefix") + regionName(code))
 	if a.onRegionChange != nil {
 		a.onRegionChange(code)
 	}
@@ -1010,17 +1086,17 @@ func (a *TrayApp) setRegion(code string, selected *systray.MenuItem) {
 func regionName(code string) string {
 	switch code {
 	case "RU":
-		return "Russia"
+		return T("region_russia")
 	case "EU":
-		return "Europe"
+		return T("region_europe")
 	case "US":
-		return "USA"
+		return T("region_usa")
 	case "CN":
-		return "China"
+		return T("region_china")
 	case "XX":
-		return "Other"
+		return T("region_other")
 	default:
-		return "Auto"
+		return T("region_auto")
 	}
 }
 
@@ -1068,8 +1144,8 @@ func (a *TrayApp) ShowLoginError() {
 	if wasConnected && a.onDisconnect != nil {
 		a.onDisconnect(false)
 	}
-	a.setTrayIcon(readAsset("snc_error.png"), "Login error â€” your key was rejected")
-	systray.SetTooltip("ShortNerdCat â€” Login error")
+	a.setTrayIcon(readAsset("snc_error.png"), T("login_error_key_rejected"))
+	systray.SetTooltip("ShortNerdCat â€” " + T("status_login_error"))
 	a.mDisconnect.Hide()
 	a.mConnect.Show()
 }

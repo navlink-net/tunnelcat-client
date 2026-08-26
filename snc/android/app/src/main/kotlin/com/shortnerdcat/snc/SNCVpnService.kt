@@ -28,6 +28,9 @@ import android.os.Handler
 import android.os.Looper
 import android.os.ParcelFileDescriptor
 import android.os.PowerManager
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
 import android.system.Os
 import android.system.OsConstants
 import android.telephony.TelephonyManager
@@ -59,6 +62,7 @@ class SNCVpnService : VpnService() {
     private var screenReceiver: BroadcastReceiver? = null
     private var wakeLock: PowerManager.WakeLock? = null
     private val stateWatchActive = AtomicBoolean(false)
+    private var decoyTraffic: DecoyTraffic? = null
     // Network-quality diagnostics (type/signal/bandwidth/location) for support logs —
     // see networkDiagnosticsLine(). lastLoggedNetDiag avoids re-logging on every
     // onCapabilitiesChanged callback (which can fire every few seconds) when nothing
@@ -67,6 +71,19 @@ class SNCVpnService : VpnService() {
     private var lastLoggedNetDiag: String? = null
     private val netHeartbeatActive = AtomicBoolean(false)
     private var netHeartbeatThread: Thread? = null
+    // Timestamp (millis) of the last IPC send that actually reached Go, updated by
+    // sendIpc on success for EVERY tag (heartbeat, nettype, screen-on/off, etc.) --
+    // not scoped to heartbeat alone, since any successful send equally proves the
+    // channel is alive. Reset to "now" right when ipcPath is (re)established so a
+    // stale value from a previous generation can't mask this generation's own
+    // failure. See startNetHeartbeat's ipcDeadRestartThreshold check: real user
+    // logs (2026-08-25) showed this channel going persistently silent for a whole
+    // session -- Go's own log confirmed its listener bound fine, so this isn't the
+    // already-fixed startup race (2026-08-11's retry-with-backoff); something
+    // deeper (device/OS-specific) breaks the abstract-namespace socket mid-session
+    // and never recovers on its own. A dead process relaunch (fresh generation,
+    // fresh socket name) is the one thing that's actually fixed it in practice.
+    @Volatile private var lastIpcSuccessAt: Long = 0L
     // Set false right before protectServer.close() in stopVpn() so protectLoop can
     // tell an intentional shutdown (stop retrying) apart from server.accept()
     // throwing for some transient reason while the service is still meant to be
@@ -79,15 +96,41 @@ class SNCVpnService : VpnService() {
     override fun onCreate() {
         super.onCreate()
         KotlinLog.init(File(filesDir, "logs"))
-        KotlinLog.log("SNCVpnService: created")
+        LogEvent.emitSystem(LogEvents.AndroidVpnCreated)
         createNotificationChannel()
         serviceInstance = this
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
-            KotlinLog.log("onStartCommand: ACTION_STOP — user disconnected")
+            LogEvent.emitSystem(
+                LogEvents.AndroidVpnStartCommand,
+                LogAttrs.ATTR_Action to "stop",
+            )
             stopVpn()
+            return START_NOT_STICKY
+        }
+        if (intent?.action == ACTION_SET_WILDCAT) {
+            val enabled = intent.getBooleanExtra(EXTRA_WILDCAT, false)
+            if (enabled) {
+                if (decoyTraffic == null) {
+                    decoyTraffic = DecoyTraffic(this).also { it.start() }
+                }
+            } else {
+                decoyTraffic?.stop()
+                decoyTraffic = null
+            }
+            // The IPC socket is only available after bootstrap completes.
+            // When WildCat is toggled while still connecting (bootstrap in progress),
+            // sendIpc silently fails and the Go core never sees the command.
+            // Restart the VPN process so SNC_WILDCAT is set correctly in the env from startup.
+            val k = lastKey
+            if (k != null && (isRunning || isConnecting)) {
+                stopVpn(selfStop = false)
+                isConnecting = true
+                notifyState()
+                startService(Intent(this, SNCVpnService::class.java).putExtra(EXTRA_KEY, k))
+            }
             return START_NOT_STICKY
         }
         // Resolve key: prefer the one in the intent (normal start / reconnect),
@@ -103,7 +146,12 @@ class SNCVpnService : VpnService() {
         }
         // Persist so the next sticky restart can recover without user interaction.
         getSharedPreferences("snc", MODE_PRIVATE).edit().putString(PREF_KEY, key).apply()
-        KotlinLog.log("onStartCommand: $startReason gen=${generation + 1}")
+        LogEvent.emitSystem(
+            LogEvents.AndroidVpnStartCommand,
+            LogAttrs.ATTR_Action to "start",
+            LogAttrs.ATTR_Reason to startReason,
+            LogAttrs.ATTR_Gen to (generation + 1).toLong(),
+        )
         // Full teardown of any existing session before starting a new one.
         // Closes TUN fd, kills the Go process, deletes all state files, and
         // unregisters callbacks — so the new session always starts from a clean slate.
@@ -118,29 +166,40 @@ class SNCVpnService : VpnService() {
         notifyState()
         startForeground(NOTIFICATION_ID, buildNotification())
         acquireWakeLock()
+        // WildCat token: prefer the one supplied by MainActivity (Browse-tab flow); fall back to
+        // the cached token for sticky restarts where Android relaunches the service without
+        // the user explicitly pressing Connect (token may still be valid if <18 min elapsed).
+        val wildcatNow = getSharedPreferences("snc", MODE_PRIVATE).getBoolean("wildcat", false)
+        val wildcatToken: String? = if (wildcatNow) {
+            intent?.getStringExtra(EXTRA_WILDCAT_TOKEN) ?: WildcatAuth.getCachedToken(this)
+        } else null
         // manual: true only for a genuine user-initiated connect (EXTRA_KEY present in
         // the intent, i.e. the "connect" branch of startReason above) -- "reconnect"
-        // (internal) and "sticky-restart" (Android relaunching a killed service) are
-        // both auto. Threaded through to the Go process as SNC_AUTO_RECONNECT so the
-        // admin dashboard's connection-stats feature can count manual vs automatic
-        // connects (see core.ConnStatsCollector).
+        // (internal, e.g. WildCat toggle) and "sticky-restart" (Android relaunching a
+        // killed service) are both auto. Threaded through to the Go process as
+        // SNC_AUTO_RECONNECT so the admin dashboard's connection-stats feature can
+        // count manual vs automatic connects (see core.ConnStatsCollector).
         val manual = startReason == "connect"
-        Thread({ startVpn(key, gen, manual) }, "snc-vpn-start").start()
+        Thread({ startVpn(key, gen, wildcatToken, manual) }, "snc-vpn-start").start()
         return START_STICKY
     }
 
-    private fun startVpn(key: String, gen: Int, manual: Boolean = true) {
+    private fun startVpn(key: String, gen: Int, wildcatToken: String?, manual: Boolean = true) {
         // processExited: true if Go exited normally (any code); false if setup threw.
         // wasKeyDenied: captured before stopVpn() clears isKeyDenied.
         // exitState: last value of snc.state read synchronously after exit (may be empty).
+        // awaitingWildcatLogin: true when we abort early to wait for login; skip finally cleanup
+        // so the service stays alive with isConnecting=true, allowing ACTION_SET_WILDCAT to
+        // restart the VPN automatically after the user logs in.
         var processExited = false
         var wasKeyDenied = false
         var exitState = ""
+        var awaitingWildcatLogin = false
         // fatalSetupError: true when setup failed in a way that requires user action
-        // (binary missing).  Set inside try so catch can distinguish fatal from
-        // transient setup exceptions.
+        // (binary missing, WildCat warmup credential failure).  Set inside try so catch
+        // can distinguish fatal from transient setup exceptions.
         var fatalSetupError = false
-        KotlinLog.log("startVpn: gen=$gen")
+        LogEvent.emitSystem(LogEvents.AndroidVpnStartBegin, LogAttrs.ATTR_Gen to gen.toLong())
         try {
             Log.i(TAG, "startVpn: filesDir=${filesDir.absolutePath}")
 
@@ -183,16 +242,82 @@ class SNCVpnService : VpnService() {
             }, "snc-uid").apply { isDaemon = true; start() }
             Log.i(TAG, "step 2b OK")
 
-            // Read prefs and prepare paths early — needed by the main process.
+            // Read prefs and prepare paths early — needed by warmup (step 2.5) and main process.
             val snPrefs = getSharedPreferences("snc", MODE_PRIVATE)
+            val wildcatMode = snPrefs.getBoolean("wildcat", false)
             val disableUdp = snPrefs.getBoolean("disable_udp", false)
             val blockQuic = snPrefs.getBoolean("disable_quic", false)
             val disableBypass = snPrefs.getBoolean("disable_bypass", false)
-            val disableIpv6 = snPrefs.getBoolean("disable_ipv6", false)
+            // WildCat mode always forces IPv6 blocked too, same reasoning as
+            // blockQuic above: the arbiter's own ipv6_enabled kill switch (see
+            // addSplitTunnelRoutes) only speaks to normal SNC exits, nothing
+            // about the covert relay's ability to relay IPv6 -- and it almost
+            // certainly can't (same "host:port" TCP-style targets as normal
+            // exits). This is the actual enforcement point (checked live,
+            // per-dial, in appStickyDialer.ipv6Blocked on the Go side) -- the
+            // TUN route for ::/0 is now always added unconditionally
+            // (addSplitTunnelRoutes) specifically so IPv6 can't just bypass
+            // the VPN via the physical interface when this is meant to be off.
+            val disableIpv6 = snPrefs.getBoolean("disable_ipv6", false) || wildcatMode
             val logDir = File(filesDir, "logs").also { it.mkdirs() }.absolutePath
-            // Detect country once; reused by the main process.
+            // Detect country once; reused by warmup and main process.
             val countryCC = detectCountryCC(this)
+            // WildCat token is supplied as a parameter — either from the Browse-tab login flow
+            // (Connect-time) or from the SharedPreferences cache (sticky restart within 18 min).
+            if (wildcatMode) {
+                if (wildcatToken != null) {
+                    Log.i(TAG, "WildCat token ready (${wildcatToken.length} chars)")
+                } else {
+                    // No token available. Signal the UI to open the Browse-tab login flow.
+                    // The SharedPreferences flag is a fallback for when MainActivity is in the
+                    // background and the broadcast receiver is not registered yet.
+                    Log.w(TAG, "no token in WildCat mode — requesting login from Browse tab")
+                    awaitingWildcatLogin = true
+                    getSharedPreferences("snc", MODE_PRIVATE).edit()
+                        .putBoolean("wildcat_login_needed", true).apply()
+                    sendBroadcast(
+                        Intent(ACTION_WILDCAT_LOGIN_REQUIRED).setPackage(packageName)
+                            .putExtra(EXTRA_KEY, key)
+                    )
+                    return
+                }
+            }
 
+            // 2.5 (WildCat mode only): pre-VPN credential warmup.
+            // Runs snc-core without a TUN fd so the credential pool
+            // can be fetched while the hidden WebView still has direct internet access.
+            if (wildcatMode) {
+                Log.i(TAG, "step 2.5: WildCat warmup")
+                this.ipcPath = ipcName
+                val warmupProc = CoreProcess.start(
+                    context = this,
+                    key = key,
+                    tunFd = -1,
+                    protectSocket = "@$protectName",
+                    ipcSocket = "@$ipcName",
+                    logDir = logDir,
+                    dataDir = filesDir.absolutePath,
+                    wildcatMode = true,
+                    warmupOnly = true,
+                    countryCC = countryCC,
+                    wildcatAccessToken = wildcatToken,
+                )
+                val warmupCode = warmupProc.waitFor()
+                Log.i(TAG, "step 2.5: warmup exit=$warmupCode")
+                if (gen != generation) return
+                if (warmupCode != 0) {
+                    fatalSetupError = true
+                    val detail = try {
+                        File(filesDir, "warmup-error.txt").readText().trim().takeIf { it.isNotEmpty() }
+                    } catch (_: Exception) { null }
+                    throw IOException(detail ?: "WildCat warmup failed (code $warmupCode)")
+                }
+            }
+
+            // Stop the background keepalive process immediately before establishing the
+            // TUN so it does not write to shared dataDir files concurrently with the
+            // main snc-core.  Moved here (from before warmup) so background service
+            // keeps running during warmup — its cred downloads help warmup succeed.
             SncBackgroundService.instance?.pauseForVpn()
 
             // 3. Create the VPN TUN interface.
@@ -233,11 +358,15 @@ class SNCVpnService : VpnService() {
             // KotlinLog-derived zip — there is no adb access to a remote device.
             val prepareIntent = VpnService.prepare(this)
             if (prepareIntent != null) {
-                KotlinLog.log("startVpn: VpnService.prepare() returned non-null — VPN permission not granted/revoked")
+                LogEvent.emitSystem(LogEvents.AndroidVpnEstablishDiag, LogAttrs.ATTR_Stage to "prepare_needed")
             }
             val activeVpnInfo = activeForeignVpnInfo()
             if (activeVpnInfo != null) {
-                KotlinLog.log("startVpn: another VPN network is currently active ($activeVpnInfo) — establish() will likely fail until it is disconnected")
+                LogEvent.emitSystem(
+                    LogEvents.AndroidVpnEstablishDiag,
+                    LogAttrs.ATTR_Stage to "other_vpn_active",
+                    LogAttrs.ATTR_OtherVpnInfo to activeVpnInfo,
+                )
             }
             var pfd: ParcelFileDescriptor? = null
             val establishDelaysMs = longArrayOf(500, 1000, 2000, 3000)
@@ -245,13 +374,22 @@ class SNCVpnService : VpnService() {
                 if (gen != generation) return
                 pfd = builder.establish()
                 if (pfd != null) break
-                KotlinLog.log("startVpn: establish() returned null (attempt ${attempt + 1}/${establishDelaysMs.size}) — retrying in ${delay}ms")
+                LogEvent.emitSystem(
+                    LogEvents.AndroidVpnEstablishDiag,
+                    LogAttrs.ATTR_Stage to "retry",
+                    LogAttrs.ATTR_Attempt to (attempt + 1).toLong(),
+                    LogAttrs.ATTR_DelayMs to delay,
+                )
                 Log.w(TAG, "step 3: establish() returned null (attempt ${attempt + 1}/${establishDelaysMs.size}) — retrying in ${delay}ms")
                 Thread.sleep(delay)
             }
             if (pfd == null) {
-                KotlinLog.log("startVpn: establish failed after ${establishDelaysMs.size} attempts " +
-                    "(prepareNeeded=${prepareIntent != null}, otherVpnActive=${activeVpnInfo != null})")
+                LogEvent.emitSystem(
+                    LogEvents.AndroidVpnStartFailed,
+                    LogAttrs.ATTR_Attempts to establishDelaysMs.size.toLong(),
+                    LogAttrs.ATTR_PrepareNeeded to (prepareIntent != null),
+                    LogAttrs.ATTR_OtherVpnActive to (activeVpnInfo != null),
+                )
                 // Neither case is transient — retrying establish() will not help until the
                 // user acts, so surface a specific message instead of looping silently forever.
                 when {
@@ -274,7 +412,7 @@ class SNCVpnService : VpnService() {
             // very TUN and timing out forever).
             if (gen != generation) { pfd.close(); return }
             tunPfd = pfd
-            KotlinLog.log("startVpn: TUN established")
+            LogEvent.emitSystem(LogEvents.AndroidVpnTunEstablished, LogAttrs.ATTR_Gen to gen.toLong())
             Log.i(TAG, "step 3 OK: pfd=$pfd")
 
             // 4. Get the raw fd without detaching (keep pfd alive to hold the TUN open).
@@ -287,9 +425,19 @@ class SNCVpnService : VpnService() {
             // 5. Prepare IPC path. Clear snc.state from any previous run so a stale
             // key_error or key_denied doesn't suppress reconnect on the next exit.
             this.ipcPath = ipcName
+            // Baseline for the IPC-dead watchdog (startNetHeartbeat) -- this
+            // generation hasn't sent anything yet, but it also hasn't been
+            // silent for a real threshold's worth of time either. Without
+            // this reset, a stale lastIpcSuccessAt from a previous generation
+            // (or 0L on first launch) could immediately read as "already dead".
+            lastIpcSuccessAt = System.currentTimeMillis()
             // Static mirror so non-service callers (MainActivity's club-theme
             // preview and Recommend dialog) can reach the running snc-core's
-            // IPC socket without needing a bound-service reference.
+            // IPC socket without needing a bound-service reference. Left
+            // unset for the WildCat warmup process above (line ~222) --
+            // that one has no club discovery running and exits before the
+            // real tunnel starts, so a request sent while it's still the
+            // "current" path would just hang until it exits.
             ipcPathStatic = ipcName
             try { File(filesDir, "snc.state").delete() } catch (_: Exception) {}
             Log.i(TAG, "step 5: logDir=$logDir ipc=@$ipcName")
@@ -305,11 +453,13 @@ class SNCVpnService : VpnService() {
                 ipcSocket = "@$ipcName",
                 logDir = logDir,
                 dataDir = filesDir.absolutePath,
+                wildcatMode = wildcatMode,
                 disableUdp = disableUdp,
                 blockQuic = blockQuic,
                 disableBypass = disableBypass,
                 disableIpv6 = disableIpv6,
                 countryCC = countryCC,
+                wildcatAccessToken = wildcatToken,
                 manual = manual,
             )
             coreProcess = proc
@@ -326,6 +476,9 @@ class SNCVpnService : VpnService() {
             registerNetworkCallback()
             registerScreenReceiver()
             startStateWatch()
+            if (wildcatMode) {
+                decoyTraffic = DecoyTraffic(this).also { it.start() }
+            }
 
             // 7. Block until the Go process exits, then clean up.
             val exitCode = proc.waitFor()
@@ -335,28 +488,49 @@ class SNCVpnService : VpnService() {
             // have fired yet if the process exited quickly (e.g. invalid key at startup).
             exitState = try { File(filesDir, "snc.state").readText().trim() } catch (_: Exception) { "" }
             wasKeyDenied = (isKeyDenied || exitState == "key_denied") && gen == generation
-            KotlinLog.log("startVpn: process exited code=$exitCode exitState='$exitState' keyDenied=$wasKeyDenied intentional=$intentionalStop")
+            LogEvent.emitSystem(
+                LogEvents.AndroidVpnProcessExited,
+                LogAttrs.ATTR_ExitCode to exitCode.toLong(),
+                LogAttrs.ATTR_ExitState to exitState,
+                LogAttrs.ATTR_KeyDenied to wasKeyDenied,
+                LogAttrs.ATTR_Intentional to intentionalStop,
+            )
         } catch (e: Exception) {
             Log.e(TAG, "startVpn FAILED", e)
             if (gen == generation) {
                 // Distinguish fatal errors (need user action) from transient errors (retry).
                 //
-                // Fatal: the binary is missing (broken install) — show the message,
-                // stop the service, and wait for the user to fix the issue.
+                // Fatal: the binary is missing (broken install) or WildCat warmup failed
+                // with a meaningful credential error — show the message, stop the service,
+                // and wait for the user to fix the issue.
                 //
                 // Transient: establish() returned null (network not ready after a switch),
                 // socket setup failed, process launch failed, or any other IOException —
                 // treat as a soft process exit so the reconnect path in finally fires
                 // instead of stopVpn/selfStop=true which would delete the key and leave
                 // the user permanently disconnected.
-                KotlinLog.log("startVpn: exception fatal=$fatalSetupError intentional=$intentionalStop msg=${e.message}")
+                LogEvent.emitSystem(
+                    LogEvents.AndroidVpnStartException,
+                    LogAttrs.ATTR_Fatal to fatalSetupError,
+                    LogAttrs.ATTR_Intentional to intentionalStop,
+                    LogAttrs.ATTR_Msg to (e.message ?: ""),
+                )
                 when {
                     intentionalStop -> {
                         // User disconnected during setup — no error, no reconnect.
                         // processExited stays false; shouldReconnect is false via intentionalStop.
                     }
                     fatalSetupError -> {
-                        lastError = e.message ?: e.javaClass.simpleName
+                        val msg = e.message ?: e.javaClass.simpleName
+                        // account banned from API (error_code:18) — stale token is useless;
+                        // clear it and send the user back to the login screen.
+                        if (msg.contains("\"error_code\":18") || msg.contains("error_code:18")) {
+                            WildcatAuth.clearCachedToken(this)
+                            lastError = getString(R.string.error_wildcat_reauth_required)
+                            sendBroadcast(Intent(ACTION_WILDCAT_LOGIN_REQUIRED))
+                        } else {
+                            lastError = msg
+                        }
                         isError = true
                     }
                     else -> {
@@ -370,6 +544,11 @@ class SNCVpnService : VpnService() {
                 }
             }
         } finally {
+            if (awaitingWildcatLogin) {
+                // Service stays alive with isConnecting=true while Browse tab acquires a token.
+                // onStartCommand will fire again with EXTRA_WILDCAT_TOKEN once login completes.
+                return
+            }
             if (gen == generation) {
                 // Reconnect on any unintentional Go process exit unless the key was denied or
                 // invalid. Key issues require user action; all other exits (stall, unreachable
@@ -378,7 +557,14 @@ class SNCVpnService : VpnService() {
                 // above so this path fires for them too.
                 val wasKeyInvalid = exitState == "key_error"
                 val shouldReconnect = processExited && !intentionalStop && !wasKeyDenied && !wasKeyInvalid
-                KotlinLog.log("startVpn: finally shouldReconnect=$shouldReconnect processExited=$processExited intentional=$intentionalStop keyDenied=$wasKeyDenied keyInvalid=$wasKeyInvalid")
+                LogEvent.emitSystem(
+                    LogEvents.AndroidVpnReconnectDecision,
+                    LogAttrs.ATTR_ShouldReconnect to shouldReconnect,
+                    LogAttrs.ATTR_ProcessExited to processExited,
+                    LogAttrs.ATTR_Intentional to intentionalStop,
+                    LogAttrs.ATTR_KeyDenied to wasKeyDenied,
+                    LogAttrs.ATTR_KeyInvalid to wasKeyInvalid,
+                )
                 val k = if (shouldReconnect) lastKey else null
                 if (k != null) {
                     // Reconnect path: clean up the old connection but do NOT call stopSelf().
@@ -386,6 +572,11 @@ class SNCVpnService : VpnService() {
                     // onStartCommand (starts new snc-core) THEN onDestroy (kills it). Keeping
                     // the service alive avoids the race; onStartCommand handles its own teardown.
                     stopVpn(selfStop = false)
+                    // Set AFTER stopVpn (which unconditionally clears the flag as a
+                    // safe default for every other stop path) so it survives into
+                    // the reconnect this call kicks off, without leaking into any
+                    // later unrelated connect if this reconnect gets interrupted.
+                    isSilentReconnect = true
                     Log.i(TAG, "vpn: process exited — reconnecting silently")
                     isConnecting = true
                     notifyState()
@@ -436,7 +627,11 @@ class SNCVpnService : VpnService() {
                 client = server.accept()
             } catch (e: IOException) {
                 if (!protectLoopActive.get()) break // intentional shutdown, not a failure
-                KotlinLog.log("protect: accept() failed, retrying: $e")
+                LogEvent.emitSystem(
+                    LogEvents.AndroidProtectLoopError,
+                    LogAttrs.ATTR_Stage to "accept_retry",
+                    LogAttrs.ATTR_Err to e.toString(),
+                )
                 try { Thread.sleep(1000) } catch (_: InterruptedException) { break }
                 continue
             }
@@ -463,7 +658,11 @@ class SNCVpnService : VpnService() {
                     // this is exactly the kind of client-side error that was
                     // invisible until we started seeing "no protect socket" warnings
                     // on the Go side with nothing here to explain why.
-                    KotlinLog.log("protect: client loop ended: $e")
+                    LogEvent.emitSystem(
+                        LogEvents.AndroidProtectLoopError,
+                        LogAttrs.ATTR_Stage to "client_loop_end",
+                        LogAttrs.ATTR_Err to e.toString(),
+                    )
                 }
                 finally { client.close() }
             }, "snc-protect-client").apply { isDaemon = true; start() }
@@ -494,7 +693,11 @@ class SNCVpnService : VpnService() {
                 client = server.accept()
             } catch (e: IOException) {
                 if (!uidLoopActive.get()) break // intentional shutdown, not a failure
-                KotlinLog.log("uid: accept() failed, retrying: $e")
+                LogEvent.emitSystem(
+                    LogEvents.AndroidUidLoopError,
+                    LogAttrs.ATTR_Stage to "accept_retry",
+                    LogAttrs.ATTR_Err to e.toString(),
+                )
                 try { Thread.sleep(1000) } catch (_: InterruptedException) { break }
                 continue
             }
@@ -512,7 +715,11 @@ class SNCVpnService : VpnService() {
                     // Usually benign (Go closed its end on reconnect) but logged
                     // anyway per the same not-swallowing-exceptions policy as
                     // protectLoop above.
-                    KotlinLog.log("uid: client loop ended: $e")
+                    LogEvent.emitSystem(
+                        LogEvents.AndroidUidLoopError,
+                        LogAttrs.ATTR_Stage to "client_loop_end",
+                        LogAttrs.ATTR_Err to e.toString(),
+                    )
                 } finally {
                     client.close()
                 }
@@ -553,7 +760,7 @@ class SNCVpnService : VpnService() {
     // takes over, or aggressive battery management reclaims the slot).  We attempt a
     // silent restart so the tunnel comes back without user interaction.
     override fun onRevoke() {
-        KotlinLog.log("onRevoke: lastKey=${lastKey != null}")
+        LogEvent.emitSystem(LogEvents.AndroidVpnRevoke, LogAttrs.ATTR_HadKey to (lastKey != null))
         val k = lastKey
         if (k != null) {
             Log.w(TAG, "VPN permission revoked — restarting silently")
@@ -570,9 +777,11 @@ class SNCVpnService : VpnService() {
     // selfStop=false is used by the reconnect path to clean up the old connection
     // without destroying the service, so the new onStartCommand is not raced by onDestroy.
     private fun stopVpn(selfStop: Boolean = true) {
-        KotlinLog.log("stopVpn: selfStop=$selfStop")
+        LogEvent.emitSystem(LogEvents.AndroidVpnStop, LogAttrs.ATTR_SelfStop to selfStop)
         intentionalStop = true
         stateWatchActive.set(false)
+        decoyTraffic?.stop()
+        decoyTraffic = null
         releaseWakeLock()
         unregisterNetworkCallback()
         unregisterScreenReceiver()
@@ -581,6 +790,10 @@ class SNCVpnService : VpnService() {
         isKeyDenied = false
         isReconnecting = false
         isTunnelReady = false
+        // Safe default on every stop path; the one caller that actually wants
+        // a silent reconnect (onStartCommand's shouldReconnect branch) sets
+        // this back to true itself, right after this call returns.
+        isSilentReconnect = false
         File(filesDir, "snc.state").delete()
         File(filesDir, "snc.traffic").delete()
         File(filesDir, "snc.browse").delete()
@@ -603,8 +816,8 @@ class SNCVpnService : VpnService() {
         uidServer = null
         // Best-effort: tell Go this session is ending (manual = selfStop -- a
         // genuine user/explicit disconnect vs. the teardown-before-reconnect case,
-        // where selfStop=false and a new startVpn follows immediately) before
-        // destroy() kills the process. Same fire-and-forget,
+        // e.g. WildCat toggle, where selfStop=false and a new startVpn follows
+        // immediately) before destroy() kills the process. Same fire-and-forget,
         // no-response-awaited shape as sendReconnect -- there is no cooperative
         // shutdown handshake here (destroy() sends SIGTERM right after this),
         // so this can race and lose the message on a slow/loaded device. Losing
@@ -713,7 +926,11 @@ class SNCVpnService : VpnService() {
             val cb = object : ConnectivityManager.NetworkCallback() {
                 override fun onAvailable(network: Network) {
                     val type = currentNetworkType()
-                    KotlinLog.log("network: AVAILABLE ${networkDiagnosticsLine()}")
+                    LogEvent.emitSystem(
+                        LogEvents.AndroidNetworkEvent,
+                        LogAttrs.ATTR_Kind to "available",
+                        LogAttrs.ATTR_Detail to networkDiagnosticsLine(),
+                    )
                     sendNetworkType(type)
                     sendReconnect("onAvailable/$type")
                 }
@@ -721,14 +938,22 @@ class SNCVpnService : VpnService() {
                     // caps for the lost network are already gone by the time this fires,
                     // so this logs whatever the (new, if any) active network looks like —
                     // lastLoggedNetDiag/the heartbeat carry the last-seen-good snapshot.
-                    KotlinLog.log("network: LOST last-good=${lastLoggedNetDiag ?: "n/a"}")
+                    LogEvent.emitSystem(
+                        LogEvents.AndroidNetworkEvent,
+                        LogAttrs.ATTR_Kind to "lost",
+                        LogAttrs.ATTR_Detail to "last-good=${lastLoggedNetDiag ?: "n/a"}",
+                    )
                     sendNetworkType("none")
                     sendReconnect("onLost")
                 }
                 override fun onCapabilitiesChanged(network: Network, caps: android.net.NetworkCapabilities) {
                     val line = networkDiagnosticsLine()
                     if (line != lastLoggedNetDiag) {
-                        KotlinLog.log("network: $line")
+                        LogEvent.emitSystem(
+                            LogEvents.AndroidNetworkEvent,
+                            LogAttrs.ATTR_Kind to "capabilities_changed",
+                            LogAttrs.ATTR_Detail to line,
+                        )
                         lastLoggedNetDiag = line
                     }
                 }
@@ -738,10 +963,14 @@ class SNCVpnService : VpnService() {
             cm.registerDefaultNetworkCallback(cb, Handler(ht.looper))
             networkCallback = cb
             Log.i(TAG, "network callback registered")
-            KotlinLog.log("network: callback registered")
+            LogEvent.emitSystem(LogEvents.AndroidNetworkEvent, LogAttrs.ATTR_Kind to "callback_registered")
             // Log the current network type at registration time.
             val line = networkDiagnosticsLine()
-            KotlinLog.log("network: $line")
+            LogEvent.emitSystem(
+                LogEvents.AndroidNetworkEvent,
+                LogAttrs.ATTR_Kind to "initial_diag",
+                LogAttrs.ATTR_Detail to line,
+            )
             lastLoggedNetDiag = line
             sendNetworkType(currentNetworkType())
             startNetHeartbeat()
@@ -750,7 +979,11 @@ class SNCVpnService : VpnService() {
             // the entire session, and previously the only trace was Logcat -- gone by
             // the time a user sends us a log ZIP. Must survive into the file log.
             Log.w(TAG, "registerNetworkCallback failed: $e")
-            KotlinLog.log("network: callback registration FAILED: $e")
+            LogEvent.emitSystem(
+                LogEvents.AndroidNetworkEvent,
+                LogAttrs.ATTR_Kind to "callback_registration_failed",
+                LogAttrs.ATTR_Detail to e.toString(),
+            )
         }
     }
 
@@ -770,7 +1003,7 @@ class SNCVpnService : VpnService() {
                 // the rest of the process's life, with no trace in Logcat. Catch and log
                 // instead of letting one bad iteration end the loop permanently.
                 try {
-                    KotlinLog.log("network: heartbeat ${networkDiagnosticsLine()}")
+                    LogEvent.emitSystem(LogEvents.AndroidNetworkHeartbeat, LogAttrs.ATTR_Detail to networkDiagnosticsLine())
                 } catch (e: Exception) {
                     Log.w(TAG, "net heartbeat iteration failed: $e")
                 }
@@ -778,9 +1011,39 @@ class SNCVpnService : VpnService() {
                 // if this thread goes quiet, since Go's log has proven reliable even
                 // when snc_lifecycle.log silently stopped during the 2026-08-06 incident.
                 sendIpc("{\"cmd\":\"heartbeat\"}", "heartbeat")
+
+                // IPC-dead watchdog: if nothing has gotten through this channel (any
+                // tag, not just heartbeat) for ipcDeadRestartThresholdMs, force a
+                // process relaunch instead of sitting silently broken until the user
+                // notices and manually disconnects/reconnects. Real user logs
+                // (2026-08-25) showed exactly that: heartbeat failing every 60s for
+                // the rest of the session, Go's own log confirming its socket bound
+                // fine, and the session only ever ending via manual disconnect --
+                // the existing WildCat "no live TURN sessions" watchdog never got a
+                // chance to fire because the user always gave up first. Calling
+                // coreProcess.destroy() directly (not stopVpn()) leaves
+                // intentionalStop false, so the existing "process exited
+                // unintentionally -> reconnect silently" path in onStartCommand
+                // picks it up exactly like any other soft failure.
+                val silentForMs = System.currentTimeMillis() - lastIpcSuccessAt
+                if (silentForMs >= ipcDeadRestartThresholdMs) {
+                    Log.w(TAG, "IPC silent for ${silentForMs}ms — forcing process restart")
+                    LogEvent.emitSystem(
+                        LogEvents.AndroidIpcWatchdogRestart,
+                        LogAttrs.ATTR_SilentForMs to silentForMs,
+                    )
+                    coreProcess?.destroy()
+                    break
+                }
             }
         }, "snc-net-heartbeat").apply { isDaemon = true; start() }
     }
+
+    // 3 missed heartbeats' worth of total IPC silence -- long enough that this is
+    // clearly not a transient blip (those are already covered by sendIpc's own
+    // 4-attempt/~1.2s retry), short enough that a real dead channel doesn't leave
+    // the user stuck for the better part of an hour before self-healing.
+    private val ipcDeadRestartThresholdMs = 3 * 60_000L
 
     private fun stopNetHeartbeat() {
         netHeartbeatActive.set(false)
@@ -836,6 +1099,7 @@ class SNCVpnService : VpnService() {
         val notifFile = File(filesDir, "snc.notif")
         val trafficFile = File(filesDir, "snc.traffic")
         val toastFile = File(filesDir, "snc.toast")
+        val migratedKeyFile = File(filesDir, "snc.migrated_key")
         val cidrStatusFile = File(filesDir, "snc.cidr_status")
         val manifestStatusFile = File(filesDir, "snc.manifest_status")
         Thread({
@@ -869,6 +1133,20 @@ class SNCVpnService : VpnService() {
                         }
                         if (tunnelOk && !isTunnelReady) {
                             isTunnelReady = true
+                            // Genuine edge transition into the real "connected" state
+                            // (not "connecting", not a reconnect-in-progress tick --
+                            // this only fires once per state == "ok" edge, guarded by
+                            // the !isTunnelReady check above) -- triple pulse to
+                            // confirm the tunnel is actually up. Skipped for a silent
+                            // auto-reconnect (stall/no-controls/DPI-block self-heal,
+                            // see isSilentReconnect's doc comment) -- the user never
+                            // saw those go down, so buzzing to say they're back up
+                            // is a non-sequitur, not a confirmation.
+                            if (isSilentReconnect) {
+                                isSilentReconnect = false
+                            } else {
+                                vibrateConnectedPulse()
+                            }
                             Handler(Looper.getMainLooper()).post { notifyState() }
                         }
                     }
@@ -884,6 +1162,23 @@ class SNCVpnService : VpnService() {
                             Handler(Looper.getMainLooper()).post {
                                 Toast.makeText(this@SNCVpnService, msg, Toast.LENGTH_SHORT).show()
                             }
+                        }
+                    }
+                    // A legacy (V1, unsigned) key was silently upgraded to a fresh
+                    // V2 arbiter-signed one (see snc/shared/keymigrate) -- persist
+                    // it over both stored copies (ConnectionFragment's "key" for
+                    // the UI, this service's own PREF_KEY for sticky-restart
+                    // recovery) so future launches start on V2 directly instead
+                    // of re-migrating every time.
+                    if (migratedKeyFile.exists()) {
+                        val newKey = migratedKeyFile.readText().trim()
+                        migratedKeyFile.delete()
+                        if (newKey.isNotEmpty()) {
+                            getSharedPreferences("snc", Context.MODE_PRIVATE).edit()
+                                .putString("key", newKey)
+                                .putString(PREF_KEY, newKey)
+                                .apply()
+                            KotlinLog.log("state-watch: persisted migrated V2 key")
                         }
                     }
                     // Animate notification icon: alternate TX/RX arrows when data flowed
@@ -913,7 +1208,7 @@ class SNCVpnService : VpnService() {
                     }
                     Thread.sleep(2000)
                 } catch (_: InterruptedException) { break }
-                  catch (e: Exception) { KotlinLog.log("state-watch: iteration failed: $e") }
+                  catch (e: Exception) { LogEvent.emitSystem(LogEvents.AndroidStateWatchError, LogAttrs.ATTR_Err to e.toString()) }
             }
         }, "snc-state-watch").apply { isDaemon = true; start() }
     }
@@ -934,20 +1229,24 @@ class SNCVpnService : VpnService() {
         val path = ipcPath
         if (path == null) {
             // 2026-08-07: a real user's logs showed *zero* IPC commands of any kind
-            // (reconnect, nettype, screen-on/off) reaching Go across three
+            // (reconnect, nettype, screen-on/off, wildcat-token) reaching Go across three
             // full VPN sessions with confirmed network switches -- but the only trace
             // of a failure was ever going to Logcat via the catch below, which isn't
             // in the log ZIP users send us. Logging every path here (including this
             // "no path yet" case, which silently no-op'd before) to KotlinLog so the
             // next report actually shows which failure mode it is.
-            KotlinLog.log("ipc: $tag skipped -- no ipcPath set yet")
+            LogEvent.emitSystem(
+                LogEvents.AndroidIpcSend,
+                LogAttrs.ATTR_Stage to "skipped_no_path",
+                LogAttrs.ATTR_IpcTag to tag,
+            )
             return
         }
         Thread({
             // 2026-08-11: ipcPath is set right before CoreProcess.start() launches the Go
             // binary, and registerNetworkCallback() is wired up immediately after -- but
             // Go's own IPC listener only binds fairly late in its startup sequence (after
-            // DHT bootstrap, dialer pool setup, etc., per real session logs: "IPC at
+            // DHT bootstrap, relay pool setup, etc., per real session logs: "IPC at
             // @snc.ipc..." is one of the last startup lines, not the first). A network
             // event landing in that window (very plausible: onAvailable can fire almost
             // immediately if a network is already up when the callback registers) hit a
@@ -970,15 +1269,31 @@ class SNCVpnService : VpnService() {
                     sock.outputStream.write("$json\n".toByteArray())
                     sock.outputStream.flush()
                     sock.close()
-                    if (attempt > 0) KotlinLog.log("ipc: $tag OK on retry ${attempt + 1}/${retryDelaysMs.size}")
+                    if (attempt > 0) {
+                        LogEvent.emitSystem(
+                            LogEvents.AndroidIpcSend,
+                            LogAttrs.ATTR_Stage to "retry_ok",
+                            LogAttrs.ATTR_IpcTag to tag,
+                            LogAttrs.ATTR_Attempt to (attempt + 1).toLong(),
+                        )
+                    }
                     sent = true
                 } catch (e: Exception) {
                     lastErr = e
                 }
             }
+            if (sent) {
+                lastIpcSuccessAt = System.currentTimeMillis()
+            }
             if (!sent) {
                 Log.w(TAG, "sendIpc $tag: $lastErr")
-                KotlinLog.log("ipc: $tag FAILED after ${retryDelaysMs.size} attempts path=$path: $lastErr")
+                LogEvent.emitSystem(
+                    LogEvents.AndroidIpcSend,
+                    LogAttrs.ATTR_Stage to "failed",
+                    LogAttrs.ATTR_IpcTag to tag,
+                    LogAttrs.ATTR_Path to path,
+                    LogAttrs.ATTR_Err to lastErr.toString(),
+                )
             }
         }, "snc-ipc").apply { isDaemon = true; start() }
     }
@@ -993,6 +1308,35 @@ class SNCVpnService : VpnService() {
         Log.i(TAG, "wake lock acquired")
     }
 
+    // Triple short pulse (~90ms on / ~90ms off, x3) fired once per genuine
+    // connect edge -- see the tunnelOk && !isTunnelReady call site in
+    // startStateWatch(). minSdk is 26: VibratorManager needs API 31, so use
+    // it only on S+ and fall back to the deprecated-but-still-functional
+    // getSystemService(Vibrator::class.java) path below that.
+    private fun vibrateConnectedPulse() {
+        try {
+            val vibrator: Vibrator? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                (getSystemService(VibratorManager::class.java))?.defaultVibrator
+            } else {
+                @Suppress("DEPRECATION")
+                getSystemService(Vibrator::class.java)
+            }
+            if (vibrator == null || !vibrator.hasVibrator()) return
+            // timings[0] is the initial delay (0 = start immediately); pattern is
+            // on/off/on/off/on, each ~90ms.
+            val timings = longArrayOf(0, 90, 90, 90, 90, 90)
+            val amplitudes = intArrayOf(
+                0,
+                VibrationEffect.DEFAULT_AMPLITUDE, 0,
+                VibrationEffect.DEFAULT_AMPLITUDE, 0,
+                VibrationEffect.DEFAULT_AMPLITUDE,
+            )
+            vibrator.vibrate(VibrationEffect.createWaveform(timings, amplitudes, -1))
+        } catch (e: Exception) {
+            Log.w(TAG, "vibrateConnectedPulse failed: $e")
+        }
+    }
+
     private fun releaseWakeLock() {
         wakeLock?.let {
             if (it.isHeld) {
@@ -1004,7 +1348,7 @@ class SNCVpnService : VpnService() {
     }
 
     override fun onDestroy() {
-        KotlinLog.log("SNCVpnService: destroyed intentional=$intentionalStop")
+        LogEvent.emitSystem(LogEvents.AndroidVpnDestroyed, LogAttrs.ATTR_Intentional to intentionalStop)
         serviceInstance = null
         if (!intentionalStop) {
             // Android killed the service (battery optimizer, network change, memory pressure)
@@ -1141,13 +1485,22 @@ class SNCVpnService : VpnService() {
         builder.addRoute("::", 0)
     }
 
+    // Push a fresh WildCat access token to the running snc-core via IPC.
+    // Called from MainActivity's periodic 15-minute refresh.
+    internal fun sendWildcatTokenInternal(token: String) =
+        sendIpc("""{"cmd":"wildcat-token","args":{"token":"$token"}}""", "wildcat-token")
+
     companion object {
         const val ACTION_STOP = "com.shortnerdcat.snc.STOP"
         // SharedPreferences key used to persist the subscription key across
         // Android process kills so START_STICKY can recover automatically.
         private const val PREF_KEY = "last_vpn_key"
         const val ACTION_STATE_CHANGED = "com.shortnerdcat.snc.STATE_CHANGED"
+        const val ACTION_SET_WILDCAT = "com.shortnerdcat.snc.SET_WILDCAT"
+        const val ACTION_WILDCAT_LOGIN_REQUIRED = "com.shortnerdcat.snc.WILDCAT_LOGIN_REQUIRED"
         const val EXTRA_KEY = "key"
+        const val EXTRA_WILDCAT_TOKEN = "wildcat_token"
+        const val EXTRA_WILDCAT = "wildcat"
         private const val NOTIFICATION_ID = 1
         private const val CHANNEL_ID = "vpn_status"
         private const val CHANNEL_BROADCAST = "snc_broadcast"
@@ -1159,7 +1512,8 @@ class SNCVpnService : VpnService() {
             private set
 
         // Static mirror of the running instance's ipcPath -- see the write
-        // site in startVpn() for why. null whenever no tunnel process is up.
+        // site in startVpn() for why. null whenever no real tunnel process
+        // (as opposed to the WildCat warmup-only process) is up.
         @Volatile
         var ipcPathStatic: String? = null
             internal set
@@ -1173,7 +1527,11 @@ class SNCVpnService : VpnService() {
         // dispatcher. Returns null on any connect/write/read/timeout failure.
         fun sendIpcWithResponse(json: String, tag: String, timeoutMs: Int = 8000): String? {
             val path = ipcPathStatic ?: run {
-                KotlinLog.log("ipc: $tag skipped -- no running tunnel (ipcPathStatic unset)")
+                LogEvent.emitSystem(
+                    LogEvents.AndroidIpcSend,
+                    LogAttrs.ATTR_Stage to "skipped_no_tunnel",
+                    LogAttrs.ATTR_IpcTag to tag,
+                )
                 return null
             }
             return try {
@@ -1187,7 +1545,13 @@ class SNCVpnService : VpnService() {
                 line
             } catch (e: Exception) {
                 Log.w(TAG, "sendIpcWithResponse $tag: $e")
-                KotlinLog.log("ipc: $tag FAILED path=$path: $e")
+                LogEvent.emitSystem(
+                    LogEvents.AndroidIpcSend,
+                    LogAttrs.ATTR_Stage to "failed_with_response",
+                    LogAttrs.ATTR_IpcTag to tag,
+                    LogAttrs.ATTR_Path to path,
+                    LogAttrs.ATTR_Err to e.toString(),
+                )
                 null
             }
         }
@@ -1225,6 +1589,18 @@ class SNCVpnService : VpnService() {
         var isTunnelReady: Boolean = false
             private set
 
+        // Set right before a silent auto-reconnect (process exited on its own --
+        // stall, unreachable controls, DPI blocking -- see shouldReconnect in
+        // onStartCommand) restarts snc-core, and cleared once the resulting
+        // "ok" edge has been (silently) handled. The whole point of that path
+        // is to be invisible -- "vpn: process exited — reconnecting silently"
+        // -- but vibrateConnectedPulse() fires unconditionally on and
+        // tunnelOk edge, added 2026-08-22 with no exception for this case.
+        // This flag suppresses the pulse for exactly one such edge without
+        // touching the edge-detection logic itself.
+        @Volatile
+        var isSilentReconnect: Boolean = false
+
         // CIDR bypass list status: "none" / "cached" / "fresh".
         @Volatile
         var cidrStatus: String = "none"
@@ -1244,9 +1620,14 @@ class SNCVpnService : VpnService() {
         @Volatile
         private var serviceInstance: SNCVpnService? = null
 
+        // Push a fresh WildCat token to the live snc-core process.
+        fun pushWildcatToken(token: String) {
+            serviceInstance?.sendWildcatTokenInternal(token)
+        }
+
         // protectIfActive lets other in-process components (e.g. UpdateChecker, which
-        // isn't itself a VpnService) bypass the VPN tunnel for their own sockets.
-        // Returns true when the socket is safe to
+        // isn't itself a VpnService) bypass the VPN tunnel for their own sockets the
+        // same way DecoyTraffic already does. Returns true when the socket is safe to
         // use: either genuinely protected, or there's no active VPN to loop into in the
         // first place (full-tunnel routing only exists while this service is up).
         // Returns false only when a VPN *is* active and protect() itself failed --

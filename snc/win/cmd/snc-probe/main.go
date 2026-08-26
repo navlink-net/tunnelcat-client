@@ -16,7 +16,10 @@
 //	-socks5     <addr>    Start a SOCKS5 proxy at addr and block (e.g. 127.0.0.1:1080).
 //	                      When set, auto-probe is skipped.
 //	-router               Run data-plane probe on all controls, print qualifying pool, exit.
-//	-udp-tunnel           Force UDP transport to the control.
+//	-quic-tunnel          Force QUIC transport to the control (replaces the old
+//	                      SNCU UDP fallback -- see snc/core/quic_relay.go).
+//	-quic-probe <addr>    Perform a real QUIC handshake to host:port and print
+//	                      the RTT. No key required.
 //	-udp-probe  <addr>    Send a UDP NAT-reflection probe to host:port and print the
 //	                      observed external address. No key required.
 //	-proxy      <url>     Test an external SOCKS5 proxy (e.g. BlackBadger):
@@ -46,6 +49,7 @@ import (
 
 	"golang.org/x/net/proxy"
 
+	"shortnerdcat/snc/shared/keymigrate"
 	"tunnel_cat/snc/core"
 )
 
@@ -57,8 +61,12 @@ func main() {
 	routerFlag := flag.Bool("router", false, "Data-plane probe all controls, print qualifying pool, exit")
 	bypassFlag := flag.Bool("bypass", false, "Full routing check: fetch bypass CIDRs, classify controls by country, apply hard filter, exit.")
 	logUploadFlag := flag.Bool("log-upload", false, "Test log upload: write a probe entry to LogRing, POST to /p/v1/log/upload, print result, exit.")
-	udpTunnelFlag := flag.Bool("udp-tunnel", false, "Force UDP transport to the control; combine with -fetch or -socks5")
+	quicTunnelFlag := flag.Bool("quic-tunnel", false, "Force QUIC transport to the control; combine with -fetch or -socks5")
+	quicProbeFlag := flag.String("quic-probe", "", "Perform a real QUIC handshake to host:port, print the RTT, exit. No key needed.")
 	udpProbeFlag := flag.String("udp-probe", "", "Send UDP NAT-reflection probe to host:port, print observed external address, exit. No key needed.")
+	udpFailoverTestFlag := flag.Bool("udp-failover-test", false, "Live SOCKS5 UDP ASSOCIATE test: pin the realtime UDP dialer to a deliberately dead address, confirm the session still self-heals onto the pool and keeps delivering real UDP responses. Requires -key.")
+	udpFailoverBadAddrFlag := flag.String("udp-failover-bad-addr", "198.51.100.1:443", "Address the realtime UDP dialer is pointed at for -udp-failover-test (default: TEST-NET-2, guaranteed unreachable).")
+	udpFailoverTargetFlag := flag.String("udp-failover-target", "8.8.8.8:53", "Real UDP target -udp-failover-test relays DNS queries to.")
 	proxyFlag := flag.String("proxy", "", "Test external SOCKS5 proxy (socks5://[user:pass@]host:port); fetches -fetch URL through it. No key needed.")
 	manifestFlag := flag.Bool("manifest", false, "Fetch /p/v1/manifest via relay API, print node count, exit. Requires -key.")
 	tlsProbeFlag := flag.Bool("tls-probe", false, "Test each uTLS browser preset against the control server; reports which presets can authenticate. Requires -key.")
@@ -69,6 +77,22 @@ func main() {
 
 	if !*verboseFlag {
 		core.Log.SetOutput(io.Discard)
+	}
+
+	// â”€â”€ 0a. -quic-probe: standalone QUIC handshake test, no key needed â”€â”€â”€â”€â”€â”€
+	if *quicProbeFlag != "" {
+		addr := *quicProbeFlag
+		if _, _, err := net.SplitHostPort(addr); err != nil {
+			addr = addr + ":443"
+		}
+		fmt.Printf("quic-probe %s â€¦ ", addr)
+		rtt, ok := core.ProbeControlQUIC(addr, *timeoutFlag)
+		if !ok {
+			fmt.Printf("FAIL\n")
+			os.Exit(1)
+		}
+		fmt.Printf("OK  rtt=%s\n", rtt.Round(time.Millisecond))
+		return
 	}
 
 	// â”€â”€ 0. -udp-probe: standalone UDP reachability test, no key needed â”€â”€â”€â”€â”€â”€â”€â”€
@@ -112,6 +136,24 @@ func main() {
 		die("key contains no server addresses")
 	}
 
+	// Legacy (V1, unsigned) key: its ControlNodes/Servers list is not
+	// verifiable (see snc/shared/keymigrate's doc comment), so it must not
+	// be dialed as-is. Migrate first; on failure, refuse to proceed rather
+	// than falling back to its own (unverifiable) node list.
+	if kd.IsLegacy() {
+		fmt.Printf("legacy V1 key detected for %s, migrating to V2 â€¦ ", kd.Username)
+		migCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		_, newKD, migErr := keymigrate.Migrate(migCtx, kd)
+		cancel()
+		if migErr != nil {
+			fmt.Println("FAIL")
+			die("legacy key migration: %v", migErr)
+		}
+		fmt.Printf("OK (key_id=%.8sâ€¦)\n", newKD.KeyID)
+		kd = newKD
+		nodes = kd.Nodes()
+	}
+
 	serverURL := *serverFlag
 	if serverURL == "" {
 		serverURL = ensureHTTPS(nodes[0])
@@ -134,23 +176,29 @@ func main() {
 		fmt.Printf("myip  %s\n", ip)
 	}
 
-	// â”€â”€ 3e. -udp-tunnel mode â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+	// â”€â”€ 3e. -quic-tunnel mode â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 	var dialer *core.TunnelDialer
-	if *udpTunnelFlag {
+	if *quicTunnelFlag {
 		controlAddr := nodes[0]
 		if _, _, err := net.SplitHostPort(controlAddr); err != nil {
 			controlAddr = controlAddr + ":443"
 		}
-		fmt.Printf("udp-tunnel  opening UDP conn to %s â€¦ ", controlAddr)
-		udpConn, err := core.NewUDPControlConn(controlAddr)
-		if err != nil {
-			fmt.Printf("FAIL: %v\n", err)
+		fmt.Printf("quic-tunnel  handshaking to %s â€¦ ", controlAddr)
+		rtt, ok := core.ProbeControlQUIC(controlAddr, *timeoutFlag)
+		if !ok {
+			fmt.Printf("FAIL\n")
 			os.Exit(1)
 		}
-		fmt.Println("OK")
-		dialer = core.NewUDPRelayDialer(udpConn, auth)
+		fmt.Printf("OK  rtt=%s\n", rtt.Round(time.Millisecond))
+		dialer = core.NewQUICRelayDialer(controlAddr, auth)
 	} else {
 		dialer = core.NewTunnelDialer(auth)
+	}
+
+	// â”€â”€ 3f. -udp-failover-test mode â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+	if *udpFailoverTestFlag {
+		runUDPFailoverTest(kd, nodes, *udpFailoverBadAddrFlag, *udpFailoverTargetFlag, *timeoutFlag)
+		return
 	}
 
 	// â”€â”€ 3b. -manifest mode â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -167,8 +215,6 @@ func main() {
 
 	// â”€â”€ 3c. -log-upload mode â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 	if *logUploadFlag {
-		core.LogRing.Write([]byte("snc-probe log-upload test\n")) //nolint:errcheck
-
 		nodeID := "snc-probe"
 		lu := core.NewLogUploader(nodeID, "windows")
 		dialer := core.NewTunnelDialer(auth)
@@ -271,13 +317,14 @@ func main() {
 		} else {
 			fmt.Printf("relays  FAIL: %v\n", err)
 		}
-		fmt.Println("probing controls (TCP data-plane, UDP fallback)â€¦")
+		fmt.Println("probing controls (TCP vs QUIC, racing on RTT â€” whichever is faster wins, not a TCP-first fallback)â€¦")
 		router.ProbeDataPlane(*timeoutFlag)
 		router.BuildPaths()
 		qualifying := router.QualifyingControlAddrs()
 		fmt.Printf("\nqualifying controls (%d):\n", len(qualifying))
 		for _, addr := range qualifying {
-			fmt.Printf("  %-40s  transport=%s\n", addr, router.ControlTransportName(addr))
+			fmt.Printf("  %-40s  transport=%-4s  rtt=%s\n",
+				addr, router.ControlTransportName(addr), router.ControlRTT(addr).Round(time.Millisecond))
 		}
 		paths := router.Paths()
 		fmt.Printf("\ntop paths (%d):\n", len(paths))
@@ -519,6 +566,209 @@ func runManifestProbe(serverURL, pubkeyHex string, timeout time.Duration) {
 		os.Exit(1)
 	}
 	fmt.Printf("OK  dur=%s  nodes=%d\n", dur, nodes)
+}
+
+// runUDPFailoverTest is a live regression check for the 2026-08-19/20
+// incident: a call's realtime UDP dialer dying mid-session used to leave
+// every destination already pinned to it stuck retrying a dead transport
+// until each one independently burned through its own circuit-breaker
+// threshold (snc/core/udp_assoc.go's dialerFor). It builds a real SOCKS5
+// UDP ASSOCIATE session backed by a genuine pool of authenticated controls,
+// but deliberately points RealtimeUDPDialer at badAddr (default: an
+// unroutable TEST-NET-2 address) so the realtime path can never work --
+// then confirms the session still delivers real UDP responses (via the
+// pool fallback) within a bounded time instead of hanging or requiring a
+// fresh SOCKS5 session.
+func runUDPFailoverTest(kd *core.KeyData, nodes []string, badAddr, target string, timeout time.Duration) {
+	fmt.Printf("\nâ”€â”€ udp-failover-test (bad-addr=%s target=%s) â”€â”€\n", badAddr, target)
+
+	// â”€â”€ 1. Build a real pool: authenticate against every control in the key. â”€â”€
+	var dialers []*core.TunnelDialer
+	for _, n := range nodes {
+		serverURL := ensureHTTPS(n)
+		a := core.NewAuthenticator(serverURL, kd.APIKey, kd.Username, kd.Password)
+		a.SetKeyAuth(kd)
+		if err := a.Login(); err != nil {
+			fmt.Printf("pool  %-40s  FAIL: %v\n", serverURL, err)
+			continue
+		}
+		fmt.Printf("pool  %-40s  OK\n", serverURL)
+		dialers = append(dialers, core.NewTunnelDialer(a))
+	}
+	if len(dialers) == 0 {
+		die("udp-failover-test: could not authenticate against any control -- no pool to fall back to")
+	}
+	pool := core.NewDialerPool(dialers)
+
+	// â”€â”€ 2. Realtime dialer pinned to a deliberately dead address. â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+	rtAuth := core.NewAuthenticator(ensureHTTPS(nodes[0]), kd.APIKey, kd.Username, kd.Password)
+	rtAuth.SetKeyAuth(kd)
+	if err := rtAuth.Login(); err != nil {
+		die("udp-failover-test: realtime dialer auth: %v", err)
+	}
+	rtDialer := core.NewQUICRelayDialer(badAddr, rtAuth)
+	fmt.Printf("realtime  pinned to %s via QUIC (deliberately unreachable)\n", badAddr)
+
+	// â”€â”€ 3. Real SOCKS5 server: normal pool + the broken realtime dialer. â”€â”€â”€â”€â”€
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		die("listen: %v", err)
+	}
+	defer ln.Close()
+	socks := core.NewSOCKS5ServerWithPool("", pool, nil)
+	socks.RealtimeUDPDialer = rtDialer
+	go socks.Serve(ln) //nolint:errcheck
+	fmt.Printf("socks5  listening on %s\n", ln.Addr())
+
+	// â”€â”€ 4. Real SOCKS5 UDP ASSOCIATE handshake against our own server. â”€â”€â”€â”€â”€â”€
+	ctrl, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		die("udp-failover-test: dial socks5: %v", err)
+	}
+	defer ctrl.Close()
+	relayAddr, err := socks5UDPAssociate(ctrl)
+	if err != nil {
+		die("udp-failover-test: UDP ASSOCIATE: %v", err)
+	}
+	fmt.Printf("udp-assoc  relay=%s (control conn open, keeps the session alive)\n", relayAddr)
+
+	targetAddr, err := net.ResolveUDPAddr("udp4", target)
+	if err != nil {
+		die("udp-failover-test: resolve target %s: %v", target, err)
+	}
+	relay, err := net.ResolveUDPAddr("udp4", relayAddr)
+	if err != nil {
+		die("udp-failover-test: resolve relay %s: %v", relayAddr, err)
+	}
+	uconn, err := net.DialUDP("udp4", nil, relay)
+	if err != nil {
+		die("udp-failover-test: dial relay: %v", err)
+	}
+	defer uconn.Close()
+
+	query := dnsQuery("example.com.")
+	deadline := time.Now().Add(timeout * 6) // real recovery involves retries + a circuit-breaker cooldown -- give it real room
+	attempt := 0
+	t0 := time.Now()
+	for time.Now().Before(deadline) {
+		attempt++
+		frame := buildSocks5UDPFrame(targetAddr, query)
+		if _, err := uconn.Write(frame); err != nil {
+			fmt.Printf("attempt %-3d  write FAIL: %v\n", attempt, err)
+			time.Sleep(time.Second)
+			continue
+		}
+		uconn.SetReadDeadline(time.Now().Add(2 * time.Second)) //nolint:errcheck
+		buf := make([]byte, 65536)
+		n, err := uconn.Read(buf)
+		if err != nil {
+			fmt.Printf("attempt %-3d  %-8s  no response yet\n", attempt, time.Since(t0).Round(time.Millisecond))
+			continue
+		}
+		payload, perr := parseSocks5UDPFrame(buf[:n])
+		if perr != nil || len(payload) < 12 {
+			fmt.Printf("attempt %-3d  %-8s  malformed reply: %v\n", attempt, time.Since(t0).Round(time.Millisecond), perr)
+			continue
+		}
+		fmt.Printf("attempt %-3d  %-8s  OK -- %dB real DNS reply received through the pool fallback\n",
+			attempt, time.Since(t0).Round(time.Millisecond), len(payload))
+		fmt.Printf("\nudp-failover-test  PASS  recovered in %s (%d attempt(s))\n", time.Since(t0).Round(time.Millisecond), attempt)
+		return
+	}
+	fmt.Printf("\nudp-failover-test  FAIL  no real response within %s (%d attempts) -- session never recovered onto the pool\n",
+		timeout*6, attempt)
+	os.Exit(1)
+}
+
+// socks5UDPAssociate performs a minimal RFC 1928 handshake (no-auth) and
+// issues a UDP ASSOCIATE (CMD=0x03) request. Returns the server's BND
+// address -- where the caller must send UDP datagrams for this session.
+// The TCP conn must be kept open for the UDP association's lifetime.
+func socks5UDPAssociate(ctrl net.Conn) (string, error) {
+	if _, err := ctrl.Write([]byte{0x05, 0x01, 0x00}); err != nil {
+		return "", fmt.Errorf("greeting: %w", err)
+	}
+	reply := make([]byte, 2)
+	if _, err := io.ReadFull(ctrl, reply); err != nil {
+		return "", fmt.Errorf("greeting reply: %w", err)
+	}
+	if reply[0] != 0x05 || reply[1] != 0x00 {
+		return "", fmt.Errorf("unexpected greeting reply % x", reply)
+	}
+
+	req := []byte{0x05, 0x03, 0x00, 0x01, 0, 0, 0, 0, 0, 0} // CMD=UDP ASSOCIATE, ATYP=IPv4, 0.0.0.0:0
+	if _, err := ctrl.Write(req); err != nil {
+		return "", fmt.Errorf("associate req: %w", err)
+	}
+	head := make([]byte, 4)
+	if _, err := io.ReadFull(ctrl, head); err != nil {
+		return "", fmt.Errorf("associate reply header: %w", err)
+	}
+	if head[1] != 0x00 {
+		return "", fmt.Errorf("associate denied, REP=0x%02x", head[1])
+	}
+	var addr string
+	switch head[3] {
+	case 0x01: // IPv4
+		b := make([]byte, 4+2)
+		if _, err := io.ReadFull(ctrl, b); err != nil {
+			return "", fmt.Errorf("associate reply addr: %w", err)
+		}
+		addr = fmt.Sprintf("%d.%d.%d.%d:%d", b[0], b[1], b[2], b[3], int(b[4])<<8|int(b[5]))
+	default:
+		return "", fmt.Errorf("unsupported BND.ATYP 0x%02x", head[3])
+	}
+	return addr, nil
+}
+
+// buildSocks5UDPFrame wraps payload in the RFC 1928 Â§7 UDP request header.
+func buildSocks5UDPFrame(dst *net.UDPAddr, payload []byte) []byte {
+	ip4 := dst.IP.To4()
+	buf := make([]byte, 0, 10+len(payload))
+	buf = append(buf, 0x00, 0x00, 0x00, 0x01) // RSV, RSV, FRAG=0, ATYP=IPv4
+	buf = append(buf, ip4...)
+	buf = append(buf, byte(dst.Port>>8), byte(dst.Port))
+	buf = append(buf, payload...)
+	return buf
+}
+
+// parseSocks5UDPFrame strips the RFC 1928 Â§7 UDP header, returning the payload.
+func parseSocks5UDPFrame(data []byte) ([]byte, error) {
+	if len(data) < 10 {
+		return nil, fmt.Errorf("short frame (%dB)", len(data))
+	}
+	if data[2] != 0x00 {
+		return nil, fmt.Errorf("fragmented reply not supported (FRAG=0x%02x)", data[2])
+	}
+	switch data[3] {
+	case 0x01: // IPv4
+		return data[10:], nil
+	case 0x04: // IPv6
+		if len(data) < 22 {
+			return nil, fmt.Errorf("short IPv6 frame (%dB)", len(data))
+		}
+		return data[22:], nil
+	default:
+		return nil, fmt.Errorf("unsupported ATYP 0x%02x", data[3])
+	}
+}
+
+// dnsQuery builds a minimal, valid DNS query for name's A record.
+func dnsQuery(name string) []byte {
+	buf := []byte{
+		0x12, 0x34, // ID
+		0x01, 0x00, // flags: standard query, recursion desired
+		0x00, 0x01, // QDCOUNT=1
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // ANCOUNT/NSCOUNT/ARCOUNT=0
+	}
+	for _, label := range strings.Split(strings.TrimSuffix(name, "."), ".") {
+		buf = append(buf, byte(len(label)))
+		buf = append(buf, label...)
+	}
+	buf = append(buf, 0x00)       // root label
+	buf = append(buf, 0x00, 0x01) // QTYPE=A
+	buf = append(buf, 0x00, 0x01) // QCLASS=IN
+	return buf
 }
 
 func die(format string, args ...interface{}) {

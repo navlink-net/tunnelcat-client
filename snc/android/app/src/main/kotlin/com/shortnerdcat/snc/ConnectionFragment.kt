@@ -34,6 +34,7 @@ import com.shortnerdcat.snc.databinding.FragmentConnectionBinding
 import kotlinx.coroutines.launch
 import java.io.File
 import java.net.URL
+import java.util.Locale
 
 class ConnectionFragment : Fragment() {
 
@@ -55,16 +56,27 @@ class ConnectionFragment : Fragment() {
     private var lastStatusBg = 0
     private var lastConnectText: String? = null
     private var lastConnectBg = 0
+    private var lastRibbonText: String? = null
+    private var lastRibbonBg = 0
 
     // "No key yet" flow: which of the three screens (key entry / "do you have
-    // a key?" / credential login) is currently shown. Starts at the have-key
-    // prompt; explicitly reset there on logout so the flow restarts cleanly.
+    // a key?" / credential login) is currently shown. Starts at key entry --
+    // the safe default that always works even before the reachability probe
+    // resolves. HAVE_KEY_PROMPT is no longer entered automatically (kept only
+    // as dead code / for its XML group + button handlers); explicitly reset
+    // back to KEY_ENTRY on logout so the flow restarts cleanly.
     private enum class LoginScreen { KEY_ENTRY, HAVE_KEY_PROMPT, CREDENTIAL_LOGIN }
-    private var loginScreen = LoginScreen.HAVE_KEY_PROMPT
+    private var loginScreen = LoginScreen.KEY_ENTRY
 
     // Set once by a background probe of navlink.net (see NavlinkAuth.probe) --
     // decides whether the credential-login path is offered at all.
     private var navlinkReachable = false
+
+    // True once the user has manually switched login screens (Yes/No, "Log In
+    // Instead", "I Have a Key"). Guards the probe-completion auto-switch below
+    // from yanking the user to a different screen after they've already made
+    // a deliberate choice in the brief window before the probe resolves.
+    private var userSwitchedScreen = false
 
     private val stateReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) = updateUI()
@@ -78,6 +90,19 @@ class ConnectionFragment : Fragment() {
         override fun run() {
             updateUI()
             dotPollHandler.postDelayed(this, 2000)
+        }
+    }
+
+    // Live uplink/downlink counter (snc.bytes, written every 1s by the Go core --
+    // see main_linux.go's traffic-activity ticker). Separate 1s ticker from
+    // dotPollRunnable above since the byte display needs a tighter refresh
+    // cadence than the cache-status dots.
+    private var lastBandwidthText: String? = null
+    private val bandwidthPollHandler = Handler(Looper.getMainLooper())
+    private val bandwidthPollRunnable = object : Runnable {
+        override fun run() {
+            updateBandwidth()
+            bandwidthPollHandler.postDelayed(this, 1000)
         }
     }
 
@@ -119,25 +144,29 @@ class ConnectionFragment : Fragment() {
         binding.btnActivateKey.setOnClickListener {
             val key = binding.editKey.text.toString().trim()
             if (key.isEmpty()) {
-                Toast.makeText(requireContext(), "Please enter a key", Toast.LENGTH_SHORT).show()
+                Toast.makeText(requireContext(), getString(R.string.err_enter_key), Toast.LENGTH_SHORT).show()
                 return@setOnClickListener
             }
             activateKey(key)
         }
 
         binding.btnHaveKeyYes.setOnClickListener {
+            userSwitchedScreen = true
             loginScreen = LoginScreen.KEY_ENTRY
             updateUI()
         }
         binding.btnHaveKeyNo.setOnClickListener {
+            userSwitchedScreen = true
             loginScreen = if (navlinkReachable) LoginScreen.CREDENTIAL_LOGIN else LoginScreen.KEY_ENTRY
             updateUI()
         }
         binding.btnKeyEntryLogin.setOnClickListener {
+            userSwitchedScreen = true
             loginScreen = LoginScreen.CREDENTIAL_LOGIN
             updateUI()
         }
         binding.btnSwitchToKeyEntry.setOnClickListener {
+            userSwitchedScreen = true
             loginScreen = LoginScreen.KEY_ENTRY
             updateUI()
         }
@@ -159,7 +188,7 @@ class ConnectionFragment : Fragment() {
             val email = binding.editEmail.text.toString().trim()
             val password = binding.editPassword.text.toString()
             if (email.isEmpty() || password.isEmpty()) {
-                Toast.makeText(requireContext(), "Please enter email and password", Toast.LENGTH_SHORT).show()
+                Toast.makeText(requireContext(), getString(R.string.err_enter_email_password), Toast.LENGTH_SHORT).show()
                 return@setOnClickListener
             }
             binding.btnDoLogin.isEnabled = false
@@ -169,7 +198,7 @@ class ConnectionFragment : Fragment() {
                     val issued = NavlinkAuth.freeKey()
                     activateKey(issued.key)
                 } catch (e: Exception) {
-                    Toast.makeText(requireContext(), "Login failed: ${e.message}", Toast.LENGTH_LONG).show()
+                    Toast.makeText(requireContext(), getString(R.string.err_login_failed, e.message), Toast.LENGTH_LONG).show()
                 } finally {
                     _binding?.btnDoLogin?.isEnabled = true
                 }
@@ -183,16 +212,19 @@ class ConnectionFragment : Fragment() {
         // straight to navlink.net.
         viewLifecycleOwner.lifecycleScope.launch {
             navlinkReachable = NavlinkAuth.probe()
+            if (navlinkReachable && loginScreen == LoginScreen.KEY_ENTRY && !userSwitchedScreen) {
+                loginScreen = LoginScreen.CREDENTIAL_LOGIN
+            }
             updateUI()
         }
 
         binding.btnConnect.setOnClickListener {
             if (SNCVpnService.isRunning || SNCVpnService.isConnecting || pendingConnect) {
-                KotlinLog.log("user: disconnect button pressed")
+                LogEvent.emitSystem(LogEvents.UiButtonPressed, LogAttrs.ATTR_Button to "disconnect")
                 pendingConnect = false
                 stopVpn()
             } else {
-                KotlinLog.log("user: connect button pressed")
+                LogEvent.emitSystem(LogEvents.UiButtonPressed, LogAttrs.ATTR_Button to "connect")
                 proceedWithConnect()
             }
         }
@@ -200,7 +232,7 @@ class ConnectionFragment : Fragment() {
         binding.btnScan.setOnClickListener {
             qrLauncher.launch(ScanOptions().apply {
                 setDesiredBarcodeFormats(ScanOptions.QR_CODE)
-                setPrompt("Scan SNC key QR code")
+                setPrompt(getString(R.string.scan_qr_prompt))
                 setBeepEnabled(false)
                 setOrientationLocked(true)
             })
@@ -219,6 +251,7 @@ class ConnectionFragment : Fragment() {
             Context.RECEIVER_NOT_EXPORTED
         )
         dotPollHandler.post(dotPollRunnable)
+        bandwidthPollHandler.post(bandwidthPollRunnable)
         updateUI()
     }
 
@@ -226,6 +259,7 @@ class ConnectionFragment : Fragment() {
         super.onPause()
         requireContext().unregisterReceiver(stateReceiver)
         dotPollHandler.removeCallbacks(dotPollRunnable)
+        bandwidthPollHandler.removeCallbacks(bandwidthPollRunnable)
     }
 
     override fun onDestroyView() {
@@ -240,6 +274,48 @@ class ConnectionFragment : Fragment() {
         lastStatusBg = 0
         lastConnectText = null
         lastConnectBg = 0
+        lastRibbonText = null
+        lastRibbonBg = 0
+        lastBandwidthText = null
+    }
+
+    // Reads snc.bytes ("<sent> <recv>", written every 1s by the Go core's
+    // traffic-activity ticker -- see main_linux.go) and updates the
+    // bottom-right uplink/downlink counter. Hidden while disconnected since
+    // core.TotalBytes() is per-process and stale/zero once the tunnel exits.
+    private fun updateBandwidth() {
+        val b = _binding ?: return
+        if (!SNCVpnService.isRunning) {
+            if (b.textBandwidth.visibility != View.GONE) b.textBandwidth.visibility = View.GONE
+            lastBandwidthText = null
+            return
+        }
+        val raw = try {
+            File(requireContext().filesDir, "snc.bytes").readText().trim()
+        } catch (_: Exception) {
+            null
+        }
+        val parts = raw?.split(" ")
+        val sent = parts?.getOrNull(0)?.toLongOrNull() ?: 0L
+        val recv = parts?.getOrNull(1)?.toLongOrNull() ?: 0L
+        val text = "↑ ${formatBytesHuman(sent)}  ↓ ${formatBytesHuman(recv)}"
+        if (text != lastBandwidthText) {
+            b.textBandwidth.text = text
+            lastBandwidthText = text
+        }
+        if (b.textBandwidth.visibility != View.VISIBLE) b.textBandwidth.visibility = View.VISIBLE
+    }
+
+    private fun formatBytesHuman(bytes: Long): String {
+        val kb = 1024.0
+        val mb = kb * 1024
+        val gb = mb * 1024
+        return when {
+            bytes >= gb -> String.format(Locale.US, "%.1f GB", bytes / gb)
+            bytes >= mb -> String.format(Locale.US, "%.1f MB", bytes / mb)
+            bytes >= kb -> String.format(Locale.US, "%.1f KB", bytes / kb)
+            else -> "$bytes B"
+        }
     }
 
     private fun handleScannedContent(content: String) {
@@ -252,7 +328,7 @@ class ConnectionFragment : Fragment() {
                         requireActivity().runOnUiThread { setKey(key) }
                     } catch (e: Exception) {
                         requireActivity().runOnUiThread {
-                            Toast.makeText(requireContext(), "Failed to fetch key: ${e.message}", Toast.LENGTH_LONG).show()
+                            Toast.makeText(requireContext(), getString(R.string.err_fetch_key_failed, e.message), Toast.LENGTH_LONG).show()
                         }
                     }
                 }.start()
@@ -274,7 +350,7 @@ class ConnectionFragment : Fragment() {
                 stream.close()
                 if (bitmap == null) {
                     requireActivity().runOnUiThread {
-                        Toast.makeText(requireContext(), "Could not read image", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(requireContext(), getString(R.string.err_could_not_read_image), Toast.LENGTH_SHORT).show()
                     }
                     return@Thread
                 }
@@ -288,11 +364,11 @@ class ConnectionFragment : Fragment() {
                 requireActivity().runOnUiThread { handleScannedContent(result.text) }
             } catch (e: NotFoundException) {
                 requireActivity().runOnUiThread {
-                    Toast.makeText(requireContext(), "No QR code found in image", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(requireContext(), getString(R.string.err_no_qr_found), Toast.LENGTH_SHORT).show()
                 }
             } catch (e: Exception) {
                 requireActivity().runOnUiThread {
-                    Toast.makeText(requireContext(), "Error: ${e.message}", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(requireContext(), getString(R.string.err_generic, e.message), Toast.LENGTH_SHORT).show()
                 }
             }
         }.start()
@@ -303,29 +379,33 @@ class ConnectionFragment : Fragment() {
 
     // Called from MainActivity's "Logout" overflow-menu item.
     fun confirmLogout() {
-        android.app.AlertDialog.Builder(requireContext())
-            .setTitle("Logout")
-            .setMessage("Remove your SNC key from this device?")
-            .setPositiveButton("Remove") { _, _ ->
+        androidx.appcompat.app.AlertDialog.Builder(requireContext())
+            .setTitle(R.string.logout)
+            .setMessage(R.string.logout_confirm_message)
+            .setPositiveButton(R.string.logout_remove) { _, _ ->
                 pendingConnect = false
                 stopVpn()
                 prefs().edit().remove("key").apply()
                 binding.editKey.setText("")
-                loginScreen = LoginScreen.HAVE_KEY_PROMPT
+                loginScreen = LoginScreen.KEY_ENTRY
+                userSwitchedScreen = false
+                if (navlinkReachable) {
+                    loginScreen = LoginScreen.CREDENTIAL_LOGIN
+                }
                 updateUI()
             }
-            .setNegativeButton("Cancel", null)
+            .setNegativeButton(R.string.cancel, null)
             .show()
     }
 
     private fun setKey(key: String) {
         if (key.isEmpty()) {
-            Toast.makeText(requireContext(), "Empty key received", Toast.LENGTH_SHORT).show()
+            Toast.makeText(requireContext(), getString(R.string.err_empty_key_received), Toast.LENGTH_SHORT).show()
             return
         }
         binding.editKey.setText(key)
         activateKey(key)
-        Toast.makeText(requireContext(), "Key saved — tap Connect", Toast.LENGTH_SHORT).show()
+        Toast.makeText(requireContext(), getString(R.string.key_saved_tap_connect), Toast.LENGTH_SHORT).show()
     }
 
     // Shared by manual key entry, QR/deep-link scanning, and the navlink.net
@@ -347,13 +427,22 @@ class ConnectionFragment : Fragment() {
 
     private fun launchVpn() {
         val key = prefs().getString("key", null) ?: return
-        requireActivity().startForegroundService(
-            Intent(requireContext(), SNCVpnService::class.java).putExtra(SNCVpnService.EXTRA_KEY, key)
-        )
-        updateUI()
+        val wildcatMode = prefs().getBoolean("wildcat", false)
+        if (wildcatMode) {
+            // In WildCat mode the user ALWAYS goes through the Browse tab first to acquire
+            // a token. MainActivity orchestrates the full flow and starts the service
+            // with the token as an Intent extra once login completes.
+            (activity as? MainActivity)?.startWildCatConnect(key) ?: resetConnect()
+        } else {
+            requireActivity().startForegroundService(
+                Intent(requireContext(), SNCVpnService::class.java).putExtra(SNCVpnService.EXTRA_KEY, key)
+            )
+            updateUI()
+        }
     }
 
-    // Reset a pending connect attempt that did not result in a VPN start.
+    // Reset a pending connect that was handed off to MainActivity but did not result
+    // in a VPN start (e.g. login failed or Browse fragment was unavailable).
     fun resetConnect() {
         pendingConnect = false
         updateUI()
@@ -376,10 +465,29 @@ class ConnectionFragment : Fragment() {
         val connecting = SNCVpnService.isConnecting || pendingConnect
         val busy = running || connecting
         val hasKey = prefs().getString("key", "").isNullOrEmpty().not()
+        val wildcatMode = prefs().getBoolean("wildcat", false)
+
+        when {
+            !busy -> b.ribbonMode.visibility = View.GONE
+            wildcatMode -> {
+                val ribbonText = getString(R.string.wildcat_ribbon_text)
+                if (ribbonText != lastRibbonText) {
+                    b.ribbonMode.text = ribbonText
+                    lastRibbonText = ribbonText
+                }
+                val ribbonBg = Color.parseColor("#BF5600")
+                if (ribbonBg != lastRibbonBg) {
+                    b.ribbonMode.setBackgroundColor(ribbonBg)
+                    lastRibbonBg = ribbonBg
+                }
+                b.ribbonMode.visibility = View.VISIBLE
+            }
+            else -> b.ribbonMode.visibility = View.GONE
+        }
 
         // Cat Club / Elite Cat Club theming: same idle/connecting/connected/
-        // error illustration set as the regular tier, just a different
-        // theme-suffixed drawable (see ClubStatus + snc.club_status,
+        // wildcat/error illustration set as the regular tier, just a
+        // different theme-suffixed drawable (see ClubStatus + snc.club_status,
         // written by snc-core every 5s -- mirrors the Windows client's
         // themedCatPNGs picking by aw.ClubTheme).
         val ctx = requireContext()
@@ -395,7 +503,10 @@ class ConnectionFragment : Fragment() {
             keyDenied  -> themed(R.drawable.snc_error, R.drawable.snc_error_catclub, R.drawable.snc_error_elite)
             running && (!SNCVpnService.isTunnelReady || SNCVpnService.isReconnecting) ->
                 themed(R.drawable.snc_connecting, R.drawable.snc_connecting_catclub, R.drawable.snc_connecting_elite)
-            running    -> themed(R.drawable.snc_connected, R.drawable.snc_connected_catclub, R.drawable.snc_connected_elite)
+            running    -> when {
+                wildcatMode -> themed(R.drawable.snc_wildcat, R.drawable.snc_wildcat_catclub, R.drawable.snc_wildcat_elite)
+                else        -> themed(R.drawable.snc_connected, R.drawable.snc_connected_catclub, R.drawable.snc_connected_elite)
+            }
             connecting -> themed(R.drawable.snc_connecting, R.drawable.snc_connecting_catclub, R.drawable.snc_connecting_elite)
             error      -> themed(R.drawable.snc_error, R.drawable.snc_error_catclub, R.drawable.snc_error_elite)
             else       -> themed(R.drawable.snc_idle, R.drawable.snc_idle_catclub, R.drawable.snc_idle_elite)
@@ -425,7 +536,7 @@ class ConnectionFragment : Fragment() {
         val statusText = when {
             keyDenied  -> getString(R.string.status_key_denied)
             running && (!SNCVpnService.isTunnelReady || SNCVpnService.isReconnecting) -> getString(R.string.status_connecting)
-            running    -> getString(R.string.status_connected)
+            running    -> if (wildcatMode) getString(R.string.status_connected_wildcat) else getString(R.string.status_connected)
             connecting -> getString(R.string.status_connecting)
             error      -> SNCVpnService.lastError ?: getString(R.string.status_error)
             else       -> getString(R.string.status_disconnected)
@@ -436,10 +547,11 @@ class ConnectionFragment : Fragment() {
         }
 
         // Bottom status-bar color, mirroring the win/mac/linux clients:
-        // gray=disconnected, orange=connecting, green=connected, red=error.
+        // gray=disconnected, orange=connecting, green=connected, black=wildcat, red=error.
         val statusBg = when {
             keyDenied || error -> Color.parseColor("#C0392B")
             running && (!SNCVpnService.isTunnelReady || SNCVpnService.isReconnecting) -> Color.parseColor("#E08A2E")
+            running && wildcatMode -> Color.BLACK
             running -> Color.parseColor("#2E8B3D")
             connecting -> Color.parseColor("#E08A2E")
             else -> Color.parseColor("#5B6470")

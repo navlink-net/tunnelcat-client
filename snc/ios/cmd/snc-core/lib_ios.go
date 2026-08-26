@@ -9,10 +9,12 @@
 //
 // Exported C entry points (called from Swift via bridging header):
 //
-//	SNCStart(key, logDir, dataDir, tunFD) â†’ int32 (0 = ok, -1 = err)
+//	SNCStart(key, logDir, dataDir, tunFD, wildcatMode) â†’ int32 (0 = ok, -1 = err)
 //	SNCStop()
 //	SNCGetStatus() â†’ *char  (JSON; free with SNCFreeString)
 //	SNCFreeString(*char)
+//	SNCSetWildcat(int32)
+//	SNCSetWildcatToken(*char)   â€” set the access token used by WildCat mode
 //	SNCReconnect()
 //
 // The tunnel runs inside the NEPacketTunnelProvider process. iOS automatically
@@ -41,6 +43,7 @@ import (
 	"time"
 	"unsafe"
 
+	"shortnerdcat/snc/shared/keymigrate"
 	snc "tunnel_cat/snc/core"
 )
 
@@ -54,11 +57,13 @@ const (
 )
 
 var (
-	gState       atomic.Int32
-	gErrorMsg    atomic.Value // string
-	gStopCh      chan struct{}
-	gMu          sync.Mutex
-	gReconnectCh = make(chan struct{}, 1)
+	gState        atomic.Int32
+	gErrorMsg     atomic.Value // string
+	gStopCh       chan struct{}
+	gMu           sync.Mutex
+	gWildcat      atomic.Int32 // 1 = WildCat mode, toggled via the IPC surface
+	gWildcatToken atomic.Value // string, pushed via SNCSetWildcatToken
+	gReconnectCh  = make(chan struct{}, 1)
 
 	gPool     *snc.DialerPool
 	gDecoy    *snc.DecoyManager
@@ -72,6 +77,10 @@ var (
 
 	gMirrorOnce sync.Once
 	gMirror     *snc.MirrorManager
+
+	gClubDiscOnce    sync.Once
+	gClubDiscMu      sync.Mutex
+	gClubDiscoverers map[string]*snc.ClubDiscoverer
 
 	gKey      *snc.KeyData
 	gDataDir  string
@@ -93,7 +102,7 @@ var (
 // â”€â”€ Exported C entry points â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 //export SNCStart
-func SNCStart(cKey, cLogDir, cDataDir *C.char, tunFD C.int, manual C.int) C.int {
+func SNCStart(cKey, cLogDir, cDataDir *C.char, tunFD C.int, wildcatMode C.int, manual C.int) C.int {
 	gMu.Lock()
 	defer gMu.Unlock()
 
@@ -124,6 +133,9 @@ func SNCStart(cKey, cLogDir, cDataDir *C.char, tunFD C.int, manual C.int) C.int 
 	gLogDir = logDir
 	gDataDir = dataDir
 	gTunFD = int(tunFD)
+	if wildcatMode != 0 {
+		gWildcat.Store(1)
+	}
 
 	gStopCh = make(chan struct{})
 	gState.Store(stateConnecting)
@@ -155,8 +167,10 @@ func SNCStop(manual C.int) {
 //export SNCGetStatus
 func SNCGetStatus() *C.char {
 	type statusJSON struct {
-		State string `json:"state"`
-		Error string `json:"error,omitempty"`
+		State     string `json:"state"`
+		Error     string `json:"error,omitempty"`
+		BytesSent int64  `json:"bytesSent"`
+		BytesRecv int64  `json:"bytesRecv"`
 	}
 	var s statusJSON
 	switch gState.Load() {
@@ -172,6 +186,11 @@ func SNCGetStatus() *C.char {
 			s.Error = msg
 		}
 	}
+	// Live uplink/downlink counter (per-process, resets on extension restart --
+	// see core.TotalBytes's doc comment). Included unconditionally so the
+	// Swift side always has a fresh reading regardless of state; it only
+	// displays this while connected.
+	s.BytesSent, s.BytesRecv = snc.TotalBytes()
 	b, _ := json.Marshal(s)
 	return C.CString(string(b)) // caller must free
 }
@@ -179,6 +198,26 @@ func SNCGetStatus() *C.char {
 //export SNCFreeString
 func SNCFreeString(s *C.char) {
 	C.free(unsafe.Pointer(s))
+}
+
+//export SNCSetWildcat
+func SNCSetWildcat(enabled C.int) {
+	if enabled != 0 {
+		gWildcat.Store(1)
+	} else {
+		gWildcat.Store(0)
+	}
+	select {
+	case gReconnectCh <- struct{}{}:
+	default:
+	}
+}
+
+//export SNCSetWildcatToken
+func SNCSetWildcatToken(cToken *C.char) {
+	if cToken != nil {
+		gWildcatToken.Store(C.GoString(cToken))
+	}
 }
 
 //export SNCReconnect
@@ -204,6 +243,33 @@ func runTunnel(stopCh <-chan struct{}) {
 
 	kd := gKey
 	dataDir := gDataDir
+
+	// Legacy (V1, unsigned) key: its ControlNodes/Servers list is not
+	// verifiable (see snc/shared/keymigrate's doc comment), so it must not
+	// be dialed as-is. Migrate first; on failure, treat it like any other
+	// unusable key -- do NOT fall back to using its own (unverifiable)
+	// node list. Written to dataDir/snc.migrated_key so the extension's
+	// Swift side (PacketTunnelProvider's status-poll timer) can persist it
+	// into the shared UserDefaults key VPNManager reads, the same way
+	// SNCVpnService.kt does for Android via snc.migrated_key.
+	if kd.IsLegacy() {
+		snc.Log.Printf("snc-core-ios: legacy V1 key detected for %s, migrating to V2", kd.Username)
+		migCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		newKeyStr, newKD, migErr := keymigrate.Migrate(migCtx, kd)
+		cancel()
+		if migErr != nil {
+			snc.Log.Printf("snc-core-ios: legacy key migration failed: %v", migErr)
+			gState.Store(stateError)
+			gErrorMsg.Store("could not renew your key — please try again")
+			return
+		}
+		snc.Log.Printf("snc-core-ios: legacy key migrated OK, key_id=%s", newKD.KeyID)
+		if err := os.WriteFile(filepath.Join(dataDir, "snc.migrated_key"), []byte(newKeyStr), 0600); err != nil {
+			snc.Log.Printf("snc-core-ios: could not write migrated key: %v", err)
+		}
+		kd = newKD
+	}
+
 	deviceID := loadOrCreateDeviceID(dataDir)
 	gDeviceID = deviceID
 
@@ -572,7 +638,10 @@ func runTunnel(stopCh <-chan struct{}) {
 		}()
 	}
 
-	router.ProbeDataPlane(5 * time.Second)
+	// In WildCat mode all direct TCP to control nodes is blocked â€” skip data-plane probe.
+	if gWildcat.Load() == 0 {
+		router.ProbeDataPlane(5 * time.Second)
+	}
 	router.BuildPaths()
 
 	dataFailCh := make(chan struct{}, 1)
@@ -595,6 +664,8 @@ func runTunnel(stopCh <-chan struct{}) {
 	// slice of TunnelDialers. Falls back to bootstrapDialer on total failure.
 	// Returns nil when all e2e probes fail so the caller can keep the current pool.
 	buildPoolDialers := func() []*snc.TunnelDialer {
+		bootstrapDialer.Auth().ClearDialFunc()
+
 		qualAddrs := router.QualifyingControlAddrs()
 
 		// E2E probe: keep only controls whose exits are actually reachable.
@@ -608,7 +679,7 @@ func runTunnel(stopCh <-chan struct{}) {
 				var rtt time.Duration
 				var ok bool
 				if router.ControlTransportName(addr) == "udp" {
-					rtt, ok = snc.ProbeControlUDP(addr, 4*time.Second)
+					rtt, ok = snc.ProbeControlQUIC(addr, 4*time.Second)
 				} else {
 					rtt, ok = snc.ProbeControlE2E(addr, 4*time.Second)
 				}
@@ -638,9 +709,11 @@ func runTunnel(stopCh <-chan struct{}) {
 			}
 			return ri < rj
 		})
-		if len(viableAddrs) > 5 {
-			viableAddrs = viableAddrs[:5]
-		}
+		// Guarantees real TCP/QUIC diversity in the pool instead of a plain
+		// RTT-sort cap -- see BalanceByTransport's doc comment for why a
+		// pure RTT sort can silently fill the whole pool with one transport
+		// and leave no redundancy when it degrades.
+		viableAddrs = router.BalanceByTransport(viableAddrs, 5)
 
 		// Relay second-pass: build UDP relay dialers for blocked controls that have
 		// a hole-punched peer path. Additive to the direct set (no cap applied).
@@ -703,7 +776,7 @@ func runTunnel(stopCh <-chan struct{}) {
 							var rtt time.Duration
 							var ok bool
 							if router.ControlTransportName(addr) == "udp" {
-								rtt, ok = snc.ProbeControlUDP(addr, 4*time.Second)
+								rtt, ok = snc.ProbeControlQUIC(addr, 4*time.Second)
 							} else {
 								rtt, ok = snc.ProbeControlE2E(addr, 4*time.Second)
 							}
@@ -987,6 +1060,32 @@ func runTunnel(stopCh <-chan struct{}) {
 		}
 	})
 
+	gClubDiscOnce.Do(func() {
+		discs := make(map[string]*snc.ClubDiscoverer)
+		for _, slug := range []string{"cat_club", "elite_cat_club"} {
+			slug := slug
+			cd, err := snc.NewClubDiscoverer(slug, kd.ArbiterPubkey, bootstrapAuth.Token, nil)
+			if err != nil {
+				snc.Log.Printf("snc-core-ios: club-discovery %s: init failed: %v", slug, err)
+				continue
+			}
+			cd.SetServerURL(bootstrapURL)
+			cd.SetMembershipCallback(func(ok bool) {
+				snc.Log.Printf("snc-core-ios: club-discovery %s: membership=%v", slug, ok)
+				if router != nil && pool != nil {
+					if nd := buildPoolDialers(); nd != nil {
+						pool.Swap(nd)
+					}
+				}
+			})
+			cd.Start(10 * time.Minute)
+			discs[slug] = cd
+		}
+		gClubDiscMu.Lock()
+		gClubDiscoverers = discs
+		gClubDiscMu.Unlock()
+	})
+
 	pool = snc.NewDialerPool(buildPoolDialers())
 	gPool = pool
 	snc.Log.Printf("snc-core-ios: dialer pool ready size=%d", pool.Size())
@@ -1009,6 +1108,13 @@ func runTunnel(stopCh <-chan struct{}) {
 	}
 	if gConnStats != nil {
 		gConnStats.IncConnect(gManualConnect.Load() != 0)
+		// WildCat mode is decided once, at connect time (SNCStart's
+		// wildcatMode param / SNCSetWildcat before connect) -- not something
+		// that flips mid-session, so it's safe to read here to start the
+		// session-duration clock.
+		if gWildcat.Load() != 0 {
+			gConnStats.StartWildcatSession()
+		}
 	}
 
 	// SOCKS5 listener.
@@ -1021,7 +1127,15 @@ func runTunnel(stopCh <-chan struct{}) {
 	gSocksLn = socksLn
 	snc.Log.Printf("snc-core-ios: SOCKS5 at %s", socksLn.Addr())
 
-	socks5 := snc.NewSOCKS5ServerWithPool("", pool, gBypass)
+	bypassForSocks5 := gBypass
+	if gWildcat.Load() != 0 {
+		bypassForSocks5 = nil
+	}
+	socks5 := snc.NewSOCKS5ServerWithPool("", pool, bypassForSocks5)
+	// DNS goes through the tunnel in WildCat mode too (2026-08-12: flipped
+	// from the old "bypass to avoid relay latency" default -- see the same
+	// change in the other platform clients for the full reasoning). No
+	// WildcatDNS assignment needed here any more; false is the zero value.
 	gSocks5 = socks5
 	go socks5.Serve(socksLn) //nolint:errcheck
 
@@ -1036,8 +1150,10 @@ func runTunnel(stopCh <-chan struct{}) {
 
 	// Decoy traffic.
 	decoyMgr := snc.NewDecoyManager("")
-	pool.SetActivityHook(decoyMgr.MarkActivity)
-	decoyMgr.Start()
+	if gWildcat.Load() == 0 {
+		pool.SetActivityHook(decoyMgr.MarkActivity)
+		decoyMgr.Start()
+	}
 	gDecoy = decoyMgr
 
 	// Log upload: ship recent logs straight to the arbiter (navlink.net)
@@ -1051,7 +1167,9 @@ func runTunnel(stopCh <-chan struct{}) {
 			}
 			return gPool.Pick()
 		},
-		func() bool { return false },
+		func() bool {
+			return gWildcat.Load() != 0
+		},
 	)
 	defer logUploader.Stop()
 
@@ -1065,7 +1183,9 @@ func runTunnel(stopCh <-chan struct{}) {
 			}
 			return gPool.Pick()
 		},
-		func() bool { return false },
+		func() bool {
+			return gWildcat.Load() != 0
+		},
 	)
 	defer connStatsUploader.Stop()
 
@@ -1100,10 +1220,40 @@ func runTunnel(stopCh <-chan struct{}) {
 		}
 	}
 
-	// Data-plane watchdog. 2026-08-06: found and fixed on Android after a real incident where
+	// WildCat stall watchdog: if the covert-relay session dies and pool.manage()
+	// cannot recover within its backoff window, signal the NE to restart the
+	// tunnel with a clean slate. 24 ticks Ã— 5s = 2 minutes of silence triggers stop.
+	const wildcatStallTicks = 24
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		deadTicks := 0
+		for {
+			select {
+			case <-stopCh:
+				return
+			case <-ticker.C:
+			}
+			if gWildcat.Load() == 0 {
+				deadTicks = 0
+				continue
+			}
+			if deadTicks >= wildcatStallTicks {
+				snc.Log.Printf("snc-core-ios: WildCat watchdog: no live TURN sessions for %s â€” stopping tunnel",
+					time.Duration(deadTicks)*5*time.Second)
+				gState.Store(stateError)
+				gErrorMsg.Store("WildCat stall â€” restarting")
+				SNCStop()
+				return
+			}
+		}
+	}()
+
+	// Data-plane watchdog (non-WildCat mode; WildCat has its own stall watchdog
+	// above). 2026-08-06: found and fixed on Android after a real incident where
 	// the tunnel reported HTTP 200 to every POST but carried near-zero real
 	// payload for minutes with nothing to detect or recover from it; the same
-	// gap existed here.
+	// gap existed here (only the WildCat branch had a watchdog).
 	//
 	// Same day, second incident: the first version of this fix used
 	// pool.LastDataTime() (only sees dialers currently in pool.slots) for the
@@ -1127,6 +1277,9 @@ func runTunnel(stopCh <-chan struct{}) {
 			case <-stopCh:
 				return
 			case <-ticker.C:
+			}
+			if gWildcat.Load() != 0 {
+				continue
 			}
 			if snc.TunnelMonitor.IsStuck() {
 				snc.Log.Printf("snc-core-ios: watchdog: tunnel one-sided (sent but no real data received) â€” restarting tunnel from scratch")
@@ -1177,16 +1330,22 @@ func runTunnel(stopCh <-chan struct{}) {
 			case <-gReconnectCh:
 				snc.Log.Printf("snc-core-ios: reconnect triggered")
 				pool.DrainEvictions()
-				router.ProbeDataPlane(5 * time.Second)
+				if gWildcat.Load() == 0 {
+					router.ProbeDataPlane(5 * time.Second)
+				}
 				router.BuildPaths()
 				if nd := buildPoolDialers(); nd != nil {
 					pool.Swap(nd)
 				}
+				// DNS always goes through the tunnel now, WildCat or not — see
+				// the comment where socks5 is constructed above.
 				resetTimer(refreshFast)
 
 			case <-dataFailCh:
 				pool.DrainEvictions()
-				router.ProbeDataPlane(5 * time.Second)
+				if gWildcat.Load() == 0 {
+					router.ProbeDataPlane(5 * time.Second)
+				}
 				router.BuildPaths()
 				if nd := buildPoolDialers(); nd != nil {
 					pool.Swap(nd)
@@ -1203,9 +1362,12 @@ func runTunnel(stopCh <-chan struct{}) {
 						continue
 					}
 				}
-				noAliveControls := len(router.QualifyingControlAddrs()) == 0
+				isWildcat := gWildcat.Load() != 0
+				noAliveControls := !isWildcat && len(router.QualifyingControlAddrs()) == 0
 				if pool.DrainEvictions() > 0 || noAliveControls {
-					router.ProbeDataPlane(5 * time.Second)
+					if !isWildcat {
+						router.ProbeDataPlane(5 * time.Second)
+					}
 					resetTimer(refreshFast)
 				} else {
 					next := interval * 3 / 2
@@ -1220,7 +1382,7 @@ func runTunnel(stopCh <-chan struct{}) {
 					snc.Log.Printf("snc-core-ios: pool: no viable controls this cycle â€” keeping current pool")
 				} else {
 					// Guard against single bad probe collapsing pool to 1 dialer.
-					if len(newDialers) <= 1 && pool.Size() > 1 {
+					if !isWildcat && len(newDialers) <= 1 && pool.Size() > 1 {
 						snc.Log.Printf("snc-core-ios: pool shrink %dâ†’%d, stabilising", pool.Size(), len(newDialers))
 						select {
 						case <-poolRefreshStop:
@@ -1334,8 +1496,10 @@ func runTunnel(stopCh <-chan struct{}) {
 					}
 					dhtNode.SaveRelays(dhtRelaysPath) //nolint:errcheck
 					router.MergeDHTRelays(entries)
-					router.ProbeDataPlane(3 * time.Second)
-					router.BuildPaths()
+					if gWildcat.Load() == 0 {
+						router.ProbeDataPlane(3 * time.Second)
+						router.BuildPaths()
+					}
 					blockedCtrls := router.UnreachableControls()
 					if len(blockedCtrls) == 0 {
 						continue

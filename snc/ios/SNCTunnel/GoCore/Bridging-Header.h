@@ -20,11 +20,12 @@
 // SNCStart starts the tunnel goroutines inside the Network Extension process.
 // Returns 0 on success, -1 on error (bad key, logging failure, etc.).
 // tunFD is the utun file descriptor from NEPacketTunnelProvider.
+// wildcatMode: 1 = WildCat REST transport, 0 = normal.
 // manual: 1 = genuine user-initiated connect, 0 = on-demand/system-triggered --
 // feeds the admin dashboard's connection-stats feature (see
 // core.ConnStatsCollector.IncConnect on the Go side).
 int32_t SNCStart(const char *key, const char *logDir, const char *dataDir,
-                 int32_t tunFD, int32_t manual);
+                 int32_t tunFD, int32_t wildcatMode, int32_t manual);
 
 // SNCStop signals the tunnel goroutines to shut down.
 // manual: 1 = genuine user-initiated disconnect (NEProviderStopReason.userInitiated),
@@ -37,6 +38,14 @@ char *SNCGetStatus(void);
 
 // SNCFreeString frees a string returned by Go (via C.CString).
 void SNCFreeString(char *s);
+
+// SNCSetWildcat enables (1) or disables (0) WildCat mode and triggers reconnect.
+void SNCSetWildcat(int32_t enabled);
+
+// SNCSetWildcatToken passes a fresh access token to the WildCat credential manager.
+// Must be called before WildCat mode starts, and again periodically to keep
+// the token alive.
+void SNCSetWildcatToken(const char *cToken);
 
 // SNCReconnect signals the tunnel to rebuild the dialer pool (call on network change).
 void SNCReconnect(void);

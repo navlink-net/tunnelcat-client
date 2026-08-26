@@ -21,6 +21,8 @@ import (
 
 	"github.com/getlantern/systray"
 
+	"tunnel_cat/binlog"
+	"tunnel_cat/logevent"
 	"tunnel_cat/snc/core"
 )
 
@@ -36,11 +38,15 @@ var iconConnectedPNG []byte
 //go:embed assets/snc_error.png
 var iconErrorPNG []byte
 
+//go:embed assets/snc_wildcat.png
+var iconWildcatPNG []byte
+
 // Cached ICO bytes for each state (built once at package init).
 var (
 	icoIdle       []byte
 	icoConnecting []byte
 	icoConnected  []byte
+	icoWildcat    []byte
 	icoError      []byte
 	icoQuitDim    []byte // dark-gray â€” alternates with icoIdle to create a blinking quit indicator
 )
@@ -49,6 +55,7 @@ func init() {
 	icoIdle = pngToICO(iconIdlePNG)
 	icoConnecting = pngToICO(iconConnectingPNG)
 	icoConnected = pngToICO(iconConnectedPNG)
+	icoWildcat = pngToICO(iconWildcatPNG)
 	icoError = pngToICO(iconErrorPNG)
 	icoQuitDim = coloredICO(48, 48, 48)
 }
@@ -77,6 +84,25 @@ type TrayApp struct {
 	version       string
 
 	onStatusChange func() // called on every status transition; may be nil
+
+	// onSettingsChange is called whenever a settings toggle (DoH, BlockQUIC,
+	// WildCat, region) is changed FROM the tray's own context menu. The
+	// window's Settings tab and native menu bar only ever learn about a
+	// settings change through the reverse direction (AppWindow.saveSettings/
+	// toggleMenuSetting -> SetSettingsFn -> ApplyWindowSettings) -- a change
+	// made here, directly on the tray icon's menu, had no path back to the
+	// window at all before this, so its checkboxes/menu items could sit
+	// showing stale state indefinitely. Confirmed via a real support report,
+	// 2026-08-25: "DoH checked in the tray context menu, but the checkbox in
+	// the app's own settings doesn't show it." See SetSettingsChangeCallback.
+	onSettingsChange func() // may be nil
+
+	// onBytesTick is called about once/second while connected, in step with
+	// tickElapsed's own ticker -- see SetBytesTickCallback. Kept separate
+	// from onStatusChange because that one drives a full window repaint
+	// (UpdateStatus/InvalidateRect) on every call, which tickElapsed
+	// deliberately avoids doing every second (see its own comment below).
+	onBytesTick func() // may be nil
 
 	// reconnectCh receives a signal when the watchdog or a power-resume event
 	// wants the app to perform an automatic disconnect+reconnect cycle.
@@ -172,6 +198,10 @@ type TrayApp struct {
 	mUpdate        *systray.MenuItem // shown only when a newer binary has been downloaded
 	updateNotifyCh chan string       // receives new version string when update is ready
 
+	wildcatEnabled  bool
+	mWildcat        *systray.MenuItem
+	onWildcatChange func(bool)
+
 	onOpenWindow func() // opens/shows the main application window; may be nil
 }
 
@@ -195,6 +225,7 @@ func NewTrayApp(
 	autoConnect bool,
 	dohEnabled bool,
 	blockQUICEnabled bool,
+	wildcatEnabled bool,
 	preferredRegion string,
 	onLogin func() error,
 	onLogout func(),
@@ -202,6 +233,7 @@ func NewTrayApp(
 	onDisconnect func(autoReconnect bool),
 	onDNSOverHTTPSChange func(bool),
 	onBlockQUICChange func(bool),
+	onWildcatChange func(bool),
 	onRegionChange func(string),
 ) *TrayApp {
 	return &TrayApp{
@@ -210,6 +242,7 @@ func NewTrayApp(
 		autoConnect:          autoConnect,
 		dohEnabled:           dohEnabled,
 		blockQUICEnabled:     blockQUICEnabled,
+		wildcatEnabled:       wildcatEnabled,
 		preferredRegion:      preferredRegion,
 		onLogin:              onLogin,
 		onLogout:             onLogout,
@@ -217,6 +250,7 @@ func NewTrayApp(
 		onDisconnect:         onDisconnect,
 		onDNSOverHTTPSChange: onDNSOverHTTPSChange,
 		onBlockQUICChange:    onBlockQUICChange,
+		onWildcatChange:      onWildcatChange,
 		onRegionChange:       onRegionChange,
 		reconnectCh:          make(chan struct{}, 1),
 		updateNotifyCh:       make(chan string, 1),
@@ -246,6 +280,9 @@ func (a *TrayApp) IsDNSOverHTTPSEnabled() bool {
 }
 
 func (a *TrayApp) connectedIcon() []byte {
+	if a.IsWildcatEnabled() {
+		return icoWildcat
+	}
 	return icoConnected
 }
 
@@ -263,7 +300,7 @@ func (a *TrayApp) setTrayIcon(icon []byte, errMsg string) {
 
 // IsDisconnectPending reports whether a disconnect was requested while a connect
 // was already in progress. Used by the connect goroutine to abort mid-flight
-// work without waiting for the full connect to finish.
+// work (e.g. the WildCat relay pool build) without waiting for the full connect to finish.
 func (a *TrayApp) IsDisconnectPending() bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -276,6 +313,50 @@ func (a *TrayApp) IsBlockQUICEnabled() bool {
 		return a.blockQUICEnabled
 	}
 	return a.mBlockQUIC.Checked()
+}
+
+// IsWildcatEnabled reports whether the user has enabled WildCat mode.
+func (a *TrayApp) IsWildcatEnabled() bool {
+	if a.mWildcat == nil {
+		return a.wildcatEnabled
+	}
+	return a.mWildcat.Checked()
+}
+
+// IsWildcatQUICLocked reports whether WildCat mode is currently forcing QUIC
+// blocked, for the active/pending session. This is true only while a
+// WildCat connection is actually connecting or connected -- WildCat's
+// effect on the tunnel is decided once, at connect time (see doConnect),
+// so merely checking the WildCat checkbox while idle forces nothing yet.
+// The underlying Disable QUIC preference is never touched by this -- callers
+// hide/grey the checkbox instead, so un-hiding it later shows exactly the
+// state it was in before WildCat took over.
+func (a *TrayApp) IsWildcatQUICLocked() bool {
+	a.mu.Lock()
+	active := a.connected || a.connecting
+	a.mu.Unlock()
+	return active && a.IsWildcatEnabled()
+}
+
+// refreshBlockQUICVisibility hides the "Disable QUIC" checkbox while
+// IsWildcatQUICLocked, and shows it again otherwise -- see that method's
+// doc comment for why this is safe to call unconditionally on every status
+// or WildCat-setting change.
+func (a *TrayApp) refreshBlockQUICVisibility() {
+	if a.mBlockQUIC == nil {
+		return
+	}
+	a.mu.Lock()
+	loggedIn := a.loggedIn
+	a.mu.Unlock()
+	if !loggedIn {
+		return // login/logout flow already hides/shows it directly
+	}
+	if a.IsWildcatQUICLocked() {
+		a.mBlockQUIC.Hide()
+	} else {
+		a.mBlockQUIC.Show()
+	}
 }
 
 // GetPreferredRegion returns the user's current explicit region selection.
@@ -299,27 +380,28 @@ func (a *TrayApp) setRegion(code string, selected *systray.MenuItem) {
 	a.mu.Lock()
 	a.preferredRegion = code
 	a.mu.Unlock()
-	a.mRegion.SetTitle("Region: " + regionName(code))
+	a.mRegion.SetTitle(T("tray_region_prefix") + regionName(code))
 	if a.onRegionChange != nil {
 		a.onRegionChange(code)
 	}
+	a.notifySettingsChange()
 }
 
 // regionName maps an ISO region code to a display name.
 func regionName(code string) string {
 	switch code {
 	case "RU":
-		return "Russia"
+		return T("region_russia")
 	case "EU":
-		return "Europe"
+		return T("region_europe")
 	case "US":
-		return "USA"
+		return T("region_usa")
 	case "CN":
-		return "China"
+		return T("region_china")
 	case "XX":
-		return "Other"
+		return T("region_other")
 	default:
-		return "Auto"
+		return T("region_auto")
 	}
 }
 
@@ -331,29 +413,30 @@ func (a *TrayApp) Run() {
 
 func (a *TrayApp) onReady() {
 	a.setTrayIcon(icoIdle, "")
-	systray.SetTooltip("ShortNerdCat")
+	systray.SetTooltip(T("app_title"))
 
-	mOpen := systray.AddMenuItem("Open ShortNerdCat", "Open the main window")
-	a.mLogin = systray.AddMenuItem("Login", "Enter activation key")
-	a.mLogout = systray.AddMenuItem("Logout", "Log out")
+	mOpen := systray.AddMenuItem(T("tray_open"), T("tray_open_tip"))
+	a.mLogin = systray.AddMenuItem(T("login_button"), T("tray_login_tip"))
+	a.mLogout = systray.AddMenuItem(T("tray_logout"), T("tray_logout_tip"))
 	systray.AddSeparator()
-	a.mConnect = systray.AddMenuItem("Connect", "Start the VPN tunnel")
-	a.mDisconnect = systray.AddMenuItem("Disconnect", "Stop the VPN tunnel")
+	a.mConnect = systray.AddMenuItem(T("tray_connect"), T("tray_connect_tip"))
+	a.mDisconnect = systray.AddMenuItem(T("tray_disconnect"), T("tray_disconnect_tip"))
 	systray.AddSeparator()
-	a.mDNSOverHTTPS = systray.AddMenuItemCheckbox("DNS over HTTPS", "Route DNS through the tunnel using HTTPS â€” prevents ISP interference with DNS responses", a.dohEnabled)
-	a.mBlockQUIC = systray.AddMenuItemCheckbox("Disable QUIC", "Block QUIC/HTTP3 (UDP:443) â€” improves video quality on congested connections", a.blockQUICEnabled)
-	a.mRegion = systray.AddMenuItem("Region: "+regionName(a.preferredRegion), "Select your region for in-country routing")
-	a.mRegionAuto = a.mRegion.AddSubMenuItemCheckbox("Auto", "Detect region automatically", a.preferredRegion == "")
-	a.mRegionRussia = a.mRegion.AddSubMenuItemCheckbox("Russia", "Russia", a.preferredRegion == "RU")
-	a.mRegionEurope = a.mRegion.AddSubMenuItemCheckbox("Europe", "Europe", a.preferredRegion == "EU")
-	a.mRegionUSA = a.mRegion.AddSubMenuItemCheckbox("USA", "United States", a.preferredRegion == "US")
-	a.mRegionChina = a.mRegion.AddSubMenuItemCheckbox("China", "China", a.preferredRegion == "CN")
-	a.mRegionOther = a.mRegion.AddSubMenuItemCheckbox("Other", "Other / no specific region preference", a.preferredRegion == "XX")
+	a.mDNSOverHTTPS = systray.AddMenuItemCheckbox(T("tray_doh"), T("tray_doh_tip"), a.dohEnabled)
+	a.mBlockQUIC = systray.AddMenuItemCheckbox(T("tray_block_quic"), T("tray_block_quic_tip"), a.blockQUICEnabled)
+	a.mWildcat = systray.AddMenuItemCheckbox(T("tray_wildcat"), T("tray_wildcat_tip"), a.wildcatEnabled)
+	a.mRegion = systray.AddMenuItem(T("tray_region_prefix")+regionName(a.preferredRegion), T("tray_region_tip"))
+	a.mRegionAuto = a.mRegion.AddSubMenuItemCheckbox(T("region_auto"), T("tray_region_auto_tip"), a.preferredRegion == "")
+	a.mRegionRussia = a.mRegion.AddSubMenuItemCheckbox(T("region_russia"), T("region_russia"), a.preferredRegion == "RU")
+	a.mRegionEurope = a.mRegion.AddSubMenuItemCheckbox(T("region_europe"), T("region_europe"), a.preferredRegion == "EU")
+	a.mRegionUSA = a.mRegion.AddSubMenuItemCheckbox(T("region_usa"), T("region_usa_full"), a.preferredRegion == "US")
+	a.mRegionChina = a.mRegion.AddSubMenuItemCheckbox(T("region_china"), T("region_china"), a.preferredRegion == "CN")
+	a.mRegionOther = a.mRegion.AddSubMenuItemCheckbox(T("region_other"), T("tray_region_other_tip"), a.preferredRegion == "XX")
 	systray.AddSeparator()
-	mAbout := systray.AddMenuItem("About", "About ShortNerdCat")
-	a.mUpdate = systray.AddMenuItem("Update available", "Install downloaded update and restart")
+	mAbout := systray.AddMenuItem(T("tray_about"), T("tray_about_tip"))
+	a.mUpdate = systray.AddMenuItem(T("tray_update"), T("tray_update_tip"))
 	a.mUpdate.Hide()
-	mQuit := systray.AddMenuItem("Quit", "Quit ShortNerdCat")
+	mQuit := systray.AddMenuItem(T("tray_quit"), T("tray_quit_tip"))
 
 	// Initial visibility depends on login state.
 	if a.loggedIn {
@@ -366,13 +449,14 @@ func (a *TrayApp) onReady() {
 		a.mDisconnect.Hide()
 		a.mDNSOverHTTPS.Hide()
 		a.mBlockQUIC.Hide()
+		a.mWildcat.Hide()
 		a.mRegion.Hide()
 		// "Not logged in yet" is a normal startup state, not a failure -- keep
 		// the tray's error-look icon (pre-existing behavior) but don't surface
 		// it as a red "Error" bar in the main window (that's reserved for
 		// actual login/connect failures below).
 		a.setTrayIcon(icoError, "")
-		systray.SetTooltip("ShortNerdCat â€” not logged in")
+		systray.SetTooltip(T("tooltip_not_logged_in"))
 	}
 
 	// If not logged in at startup, auto-show the login dialog once the tray
@@ -394,81 +478,110 @@ func (a *TrayApp) onReady() {
 		for {
 			select {
 			case <-mOpen.ClickedCh:
-				core.Log.Printf("tray: user clicked Open Window")
+				logevent.Emit(binlog.TagSystem, logevent.EventWinTrayMenuAction, logevent.Str(logevent.AttrAction, "open_window"))
 				if a.onOpenWindow != nil {
 					go a.onOpenWindow()
 				}
 			case <-a.mLogin.ClickedCh:
-				core.Log.Printf("tray: user clicked Login")
+				logevent.Emit(binlog.TagSystem, logevent.EventWinTrayMenuAction, logevent.Str(logevent.AttrAction, "login"))
 				a.doLogin()
 			case <-a.mLogout.ClickedCh:
-				core.Log.Printf("tray: user clicked Logout")
+				logevent.Emit(binlog.TagSystem, logevent.EventWinTrayMenuAction, logevent.Str(logevent.AttrAction, "logout"))
 				go a.doLogout()
 			case <-a.mConnect.ClickedCh:
-				core.Log.Printf("tray: user clicked Connect (tray menu)")
+				logevent.Emit(binlog.TagSystem, logevent.EventWinTrayMenuAction, logevent.Str(logevent.AttrAction, "connect"))
 				// Hide immediately to block double-clicks before the goroutine starts.
 				a.mConnect.Hide()
 				go a.doConnect(false)
 			case <-a.mDisconnect.ClickedCh:
-				core.Log.Printf("tray: user clicked Disconnect (tray menu)")
+				logevent.Emit(binlog.TagSystem, logevent.EventWinTrayMenuAction, logevent.Str(logevent.AttrAction, "disconnect"))
 				a.mDisconnect.Hide()
 				go a.doDisconnect(false)
 			case <-a.mDNSOverHTTPS.ClickedCh:
-				core.Log.Printf("tray: user toggled DoH (was checked=%v)", a.mDNSOverHTTPS.Checked())
+				logevent.Emit(binlog.TagSystem, logevent.EventWinTrayMenuAction,
+					logevent.Str(logevent.AttrAction, "doh_toggle"),
+					logevent.Str(logevent.AttrDetail, fmt.Sprintf("was_checked=%v", a.mDNSOverHTTPS.Checked())))
 				if a.mDNSOverHTTPS.Checked() {
 					a.mDNSOverHTTPS.Uncheck()
 				} else {
 					a.mDNSOverHTTPS.Check()
 				}
-				core.Log.Printf("tray: DoH now=%v", a.mDNSOverHTTPS.Checked())
+				logevent.Emit(binlog.TagSystem, logevent.EventWinTrayMenuAction,
+					logevent.Str(logevent.AttrAction, "doh_now"),
+					logevent.Str(logevent.AttrDetail, fmt.Sprintf("%v", a.mDNSOverHTTPS.Checked())))
 				if a.onDNSOverHTTPSChange != nil {
 					a.onDNSOverHTTPSChange(a.mDNSOverHTTPS.Checked())
 				}
+				a.notifySettingsChange()
 			case <-a.mBlockQUIC.ClickedCh:
-				core.Log.Printf("tray: user toggled Disable QUIC (was checked=%v)", a.mBlockQUIC.Checked())
+				logevent.Emit(binlog.TagSystem, logevent.EventWinTrayMenuAction,
+					logevent.Str(logevent.AttrAction, "block_quic_toggle"),
+					logevent.Str(logevent.AttrDetail, fmt.Sprintf("was_checked=%v", a.mBlockQUIC.Checked())))
 				if a.mBlockQUIC.Checked() {
 					a.mBlockQUIC.Uncheck()
 				} else {
 					a.mBlockQUIC.Check()
 				}
-				core.Log.Printf("tray: Disable QUIC now=%v", a.mBlockQUIC.Checked())
+				logevent.Emit(binlog.TagSystem, logevent.EventWinTrayMenuAction,
+					logevent.Str(logevent.AttrAction, "block_quic_now"),
+					logevent.Str(logevent.AttrDetail, fmt.Sprintf("%v", a.mBlockQUIC.Checked())))
 				if a.onBlockQUICChange != nil {
 					a.onBlockQUICChange(a.mBlockQUIC.Checked())
 				}
+				a.notifySettingsChange()
+			case <-a.mWildcat.ClickedCh:
+				logevent.Emit(binlog.TagSystem, logevent.EventWinTrayMenuAction,
+					logevent.Str(logevent.AttrAction, "wildcat_toggle"),
+					logevent.Str(logevent.AttrDetail, fmt.Sprintf("was_checked=%v", a.mWildcat.Checked())))
+				if a.mWildcat.Checked() {
+					a.mWildcat.Uncheck()
+				} else {
+					a.mWildcat.Check()
+				}
+				logevent.Emit(binlog.TagSystem, logevent.EventWinTrayMenuAction,
+					logevent.Str(logevent.AttrAction, "wildcat_now"),
+					logevent.Str(logevent.AttrDetail, fmt.Sprintf("%v", a.mWildcat.Checked())))
+				a.refreshBlockQUICVisibility()
+				if a.onWildcatChange != nil {
+					a.onWildcatChange(a.mWildcat.Checked())
+				}
+				a.notifySettingsChange()
 			case <-a.mRegionAuto.ClickedCh:
-				core.Log.Printf("tray: user selected region Auto")
+				logevent.Emit(binlog.TagSystem, logevent.EventWinTrayMenuAction, logevent.Str(logevent.AttrAction, "region_auto"))
 				a.setRegion("", a.mRegionAuto)
 			case <-a.mRegionRussia.ClickedCh:
-				core.Log.Printf("tray: user selected region Russia")
+				logevent.Emit(binlog.TagSystem, logevent.EventWinTrayMenuAction, logevent.Str(logevent.AttrAction, "region_ru"))
 				a.setRegion("RU", a.mRegionRussia)
 			case <-a.mRegionEurope.ClickedCh:
-				core.Log.Printf("tray: user selected region Europe")
+				logevent.Emit(binlog.TagSystem, logevent.EventWinTrayMenuAction, logevent.Str(logevent.AttrAction, "region_eu"))
 				a.setRegion("EU", a.mRegionEurope)
 			case <-a.mRegionUSA.ClickedCh:
-				core.Log.Printf("tray: user selected region USA")
+				logevent.Emit(binlog.TagSystem, logevent.EventWinTrayMenuAction, logevent.Str(logevent.AttrAction, "region_us"))
 				a.setRegion("US", a.mRegionUSA)
 			case <-a.mRegionChina.ClickedCh:
-				core.Log.Printf("tray: user selected region China")
+				logevent.Emit(binlog.TagSystem, logevent.EventWinTrayMenuAction, logevent.Str(logevent.AttrAction, "region_cn"))
 				a.setRegion("CN", a.mRegionChina)
 			case <-a.mRegionOther.ClickedCh:
-				core.Log.Printf("tray: user selected region Other")
+				logevent.Emit(binlog.TagSystem, logevent.EventWinTrayMenuAction, logevent.Str(logevent.AttrAction, "region_other"))
 				a.setRegion("XX", a.mRegionOther)
 			case <-a.connectCh:
-				core.Log.Printf("tray: connectCh â€” Connect triggered from app window")
+				logevent.Emit(binlog.TagSystem, logevent.EventWinTrayMenuAction, logevent.Str(logevent.AttrAction, "connect_ch"))
 				a.mConnect.Hide()
 				go a.doConnect(false)
 			case <-a.disconnectCh:
-				core.Log.Printf("tray: disconnectCh â€” Disconnect triggered from app window")
+				logevent.Emit(binlog.TagSystem, logevent.EventWinTrayMenuAction, logevent.Str(logevent.AttrAction, "disconnect_ch"))
 				a.mDisconnect.Hide()
 				go a.doDisconnect(false)
 			case <-a.reconnectCh:
-				core.Log.Printf("tray: reconnectCh â€” auto reconnect triggered")
+				logevent.Emit(binlog.TagSystem, logevent.EventWinTrayMenuAction, logevent.Str(logevent.AttrAction, "reconnect_ch"))
 				// Run disconnect+reconnect in a background goroutine so the event
 				// loop is never blocked (onDisconnect may take tens of seconds on
 				// a post-hibernate network stack, and Quit must remain responsive).
 				go a.doReconnect()
 			case v := <-a.updateNotifyCh:
-				core.Log.Printf("tray: update notification: %s", v)
+				logevent.Emit(binlog.TagSystem, logevent.EventWinTrayMenuAction,
+					logevent.Str(logevent.AttrAction, "update_notification"),
+					logevent.Str(logevent.AttrDetail, v))
 				a.mUpdate.SetTitle("Update to " + v)
 				a.mUpdate.Show()
 				a.mu.Lock()
@@ -478,23 +591,23 @@ func (a *TrayApp) onReady() {
 					a.OnUpdateReadyChanged()
 				}
 			case <-a.mUpdate.ClickedCh:
-				core.Log.Printf("tray: user clicked Update")
+				logevent.Emit(binlog.TagSystem, logevent.EventWinTrayMenuAction, logevent.Str(logevent.AttrAction, "update_click"))
 				a.TriggerUpdateInstall()
 			case <-a.loginCh:
-				core.Log.Printf("tray: loginCh — Login triggered from app window")
+				logevent.Emit(binlog.TagSystem, logevent.EventWinTrayMenuAction, logevent.Str(logevent.AttrAction, "login_ch"))
 				a.doLogin()
 			case <-a.logoutCh:
-				core.Log.Printf("tray: logoutCh — Logout triggered from app window")
+				logevent.Emit(binlog.TagSystem, logevent.EventWinTrayMenuAction, logevent.Str(logevent.AttrAction, "logout_ch"))
 				go a.doLogout()
 			case <-a.quitCh:
-				core.Log.Printf("tray: quitCh — Quit triggered from app window")
+				logevent.Emit(binlog.TagSystem, logevent.EventWinTrayMenuAction, logevent.Str(logevent.AttrAction, "quit_ch"))
 				a.doQuit()
 				return
 			case <-mAbout.ClickedCh:
-				core.Log.Printf("tray: user clicked About")
+				logevent.Emit(binlog.TagSystem, logevent.EventWinTrayMenuAction, logevent.Str(logevent.AttrAction, "about"))
 				go ShowSplash(a.version, 5*time.Second)
 			case <-mQuit.ClickedCh:
-				core.Log.Printf("tray: user clicked Quit")
+				logevent.Emit(binlog.TagSystem, logevent.EventWinTrayMenuAction, logevent.Str(logevent.AttrAction, "quit"))
 				a.doQuit()
 				return
 			}
@@ -516,24 +629,27 @@ func (a *TrayApp) doLogin() {
 		return
 	}
 	a.setTrayIcon(icoConnecting, "")
-	systray.SetTooltip("ShortNerdCat â€” logging inâ€¦")
+	systray.SetTooltip(T("tooltip_logging_in"))
 	if err := a.onLogin(); err != nil {
-		core.Log.Printf("login failed: %v", err)
+		logevent.Emit(binlog.TagSystem, logevent.EventWinTrayConnect,
+			logevent.Str(logevent.AttrStage, "login_failed"),
+			logevent.Str(logevent.AttrErr, err.Error()))
 		msg := core.FriendlyConnectError(err)
-		a.setTrayIcon(icoError, "Login failed: "+msg)
-		systray.SetTooltip("ShortNerdCat â€” login failed: " + msg)
+		a.setTrayIcon(icoError, T("err_login_failed")+msg)
+		systray.SetTooltip(T("tooltip_login_failed") + msg)
 		return
 	}
 	a.mu.Lock()
 	a.loggedIn = true
 	a.mu.Unlock()
 	a.setTrayIcon(icoIdle, "")
-	systray.SetTooltip("ShortNerdCat")
+	systray.SetTooltip(T("app_title"))
 	a.mLogin.Hide()
 	a.mLogout.Show()
 	a.mConnect.Show()
 	a.mDNSOverHTTPS.Show()
 	a.mBlockQUIC.Show()
+	a.mWildcat.Show()
 	a.mRegion.Show()
 }
 
@@ -547,7 +663,7 @@ func (a *TrayApp) doLogout() {
 	a.loggedIn = false
 	a.mu.Unlock()
 	a.setTrayIcon(icoIdle, "")
-	systray.SetTooltip("ShortNerdCat â€” not logged in")
+	systray.SetTooltip(T("tooltip_not_logged_in"))
 	a.mConnect.Hide()
 	a.mDisconnect.Hide()
 	a.mLogout.Hide()
@@ -562,27 +678,33 @@ func (a *TrayApp) doConnect(autoReconnect bool) {
 	a.mu.Lock()
 	if a.connecting {
 		a.mu.Unlock()
-		core.Log.Printf("connect: already in progress â€” skipping duplicate call (autoReconnect=%v)", autoReconnect)
+		logevent.Emit(binlog.TagSystem, logevent.EventWinTrayConnect,
+			logevent.Str(logevent.AttrStage, "already_in_progress"),
+			logevent.Str(logevent.AttrDetail, fmt.Sprintf("autoReconnect=%v", autoReconnect)))
 		return
 	}
 	a.disconnectPending = false
 	a.userDisconnected = false
 	a.connecting = true
 	a.mu.Unlock()
-	core.Log.Printf("connect: starting (autoReconnect=%v)", autoReconnect)
+	logevent.Emit(binlog.TagSystem, logevent.EventWinTrayConnect,
+		logevent.Str(logevent.AttrStage, "starting"),
+		logevent.Str(logevent.AttrDetail, fmt.Sprintf("autoReconnect=%v", autoReconnect)))
 	a.callStatusChange()
-	core.Log.Printf("connect: hiding mConnect, showing mDisconnect")
+	logevent.Emit(binlog.TagSystem, logevent.EventWinTrayConnect, logevent.Str(logevent.AttrStage, "ui_hiding_connect"))
 	a.mConnect.Hide()
 	a.mDisconnect.Show() // allow the user to cancel while connecting
 	a.setTrayIcon(icoConnecting, "")
-	systray.SetTooltip("ShortNerdCat â€” Connectingâ€¦")
+	systray.SetTooltip(T("tooltip_connecting"))
 
 	errCh := make(chan error, 1)
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
 				stack := debug.Stack()
-				core.Log.Printf("connect: PANIC: %v\n%s", r, stack)
+				logevent.Emit(binlog.TagSystem, logevent.EventWinTrayConnect,
+					logevent.Str(logevent.AttrStage, "panic"),
+					logevent.Str(logevent.AttrDetail, fmt.Sprintf("%v\n%s", r, stack)))
 				errCh <- fmt.Errorf("connect panicked: %v", r)
 			}
 		}()
@@ -593,7 +715,9 @@ func (a *TrayApp) doConnect(autoReconnect bool) {
 	case connectErr = <-errCh:
 	case <-time.After(connectDeadline):
 		connectErr = fmt.Errorf("connect sequence hung for %v", connectDeadline)
-		core.Log.Printf("connect: %v â€” entering error state", connectErr)
+		logevent.Emit(binlog.TagSystem, logevent.EventWinTrayConnect,
+			logevent.Str(logevent.AttrStage, "error_entering"),
+			logevent.Str(logevent.AttrErr, connectErr.Error()))
 	}
 
 	a.mu.Lock()
@@ -606,29 +730,32 @@ func (a *TrayApp) doConnect(autoReconnect bool) {
 		shouldReconnect := a.reconnectAfterPending
 		a.reconnectAfterPending = false
 		a.mu.Unlock()
-		core.Log.Printf("connect: failed â€” %v (pending=%v reconnect=%v)", connectErr, pending, shouldReconnect)
+		logevent.Emit(binlog.TagSystem, logevent.EventWinTrayConnect,
+			logevent.Str(logevent.AttrStage, "failed"),
+			logevent.Str(logevent.AttrErr, connectErr.Error()),
+			logevent.Str(logevent.AttrDetail, fmt.Sprintf("pending=%v reconnect=%v", pending, shouldReconnect)))
 		a.callStatusChange()
-		core.Log.Printf("connect: hiding mDisconnect, showing mConnect")
+		logevent.Emit(binlog.TagSystem, logevent.EventWinTrayConnect, logevent.Str(logevent.AttrStage, "ui_restore_connect"))
 		a.mDisconnect.Hide()
 		if pending && shouldReconnect {
 			// Disconnect was part of an auto-reconnect cycle that fired while
 			// warmup or another slow step was in progress. Re-queue the connect
 			// so the cycle completes â€” same as the success+pending path below.
 			a.setTrayIcon(icoIdle, "")
-			systray.SetTooltip("ShortNerdCat")
-			core.Log.Printf("connect: failed with pending auto-reconnect â€” re-queuing connect")
+			systray.SetTooltip(T("app_title"))
+			logevent.Emit(binlog.TagSystem, logevent.EventWinTrayConnect, logevent.Str(logevent.AttrStage, "requeue_pending"))
 			select {
 			case a.reconnectCh <- struct{}{}:
 			default:
 			}
 		} else if pending {
 			a.setTrayIcon(icoIdle, "")
-			systray.SetTooltip("ShortNerdCat")
+			systray.SetTooltip(T("app_title"))
 			a.mConnect.Show()
 		} else {
 			msg := core.FriendlyConnectError(connectErr)
-			a.setTrayIcon(icoError, "Connect failed: "+msg)
-			systray.SetTooltip("ShortNerdCat â€” Error: " + msg)
+			a.setTrayIcon(icoError, T("err_connect_failed")+msg)
+			systray.SetTooltip(T("tooltip_error_prefix") + msg)
 			a.mConnect.Show()
 			a.scheduleRetry() // keep trying in the background
 		}
@@ -646,7 +773,7 @@ func (a *TrayApp) doConnect(autoReconnect bool) {
 
 	if pending {
 		// Tunnel came up but user already clicked Disconnect â€” tear it down immediately.
-		core.Log.Printf("connect: disconnect was requested during connect â€” tearing down")
+		logevent.Emit(binlog.TagSystem, logevent.EventWinTrayConnect, logevent.Str(logevent.AttrStage, "disconnect_during_connect"))
 		if a.onDisconnect != nil {
 			a.onDisconnect(false)
 		}
@@ -663,24 +790,41 @@ func (a *TrayApp) doConnect(autoReconnect bool) {
 		if shouldReconnect {
 			// The disconnect was part of an auto-reconnect cycle (e.g. mode toggle).
 			// Queue a new connect so the cycle completes with updated settings.
-			core.Log.Printf("connect: pending disconnect was auto-reconnect â€” re-queuing connect")
+			logevent.Emit(binlog.TagSystem, logevent.EventWinTrayConnect, logevent.Str(logevent.AttrStage, "requeue_after_disconnect"))
 			select {
 			case a.reconnectCh <- struct{}{}:
 			default:
 			}
 			return
 		}
-		core.Log.Printf("connect: pending disconnect: hiding mDisconnect, showing mConnect")
+		logevent.Emit(binlog.TagSystem, logevent.EventWinTrayConnect, logevent.Str(logevent.AttrStage, "ui_pending_restore"))
 		a.mDisconnect.Hide()
 		a.setTrayIcon(icoIdle, "")
-		systray.SetTooltip("ShortNerdCat")
+		systray.SetTooltip(T("app_title"))
 		a.mConnect.Show()
 		return
 	}
 
-	core.Log.Printf("connect: success â€” mDisconnect already visible, connected=true")
+	logevent.Emit(binlog.TagSystem, logevent.EventWinTrayConnect, logevent.Str(logevent.AttrStage, "success"))
 	a.setTrayIcon(a.connectedIcon(), "")
 	// mDisconnect is already visible
+	//
+	// The settings items (DoH/BlockQUIC/WildCat/Region), by contrast, are
+	// NOT already visible here for an auto-reconnect: doDisconnect() hides
+	// all of them unconditionally at the start of every disconnect, but only
+	// re-Shows them in its own "restore idle" branch, which is explicitly
+	// skipped for autoReconnect (see its own comment -- the icon is meant to
+	// stay on "connecting" through the cycle instead of flashing idle). This
+	// success path is the only other place that could have shown them back,
+	// and never did -- confirmed via a real support report, 2026-08-25: DoH
+	// and the region picker vanishing from the tray menu after the machine
+	// unlocks (which fires an auto-reconnect), fixed only by restarting the
+	// app. Login is guaranteed true to have reached this point at all, so
+	// showing unconditionally here is safe.
+	a.mDNSOverHTTPS.Show()
+	a.mBlockQUIC.Show()
+	a.mWildcat.Show()
+	a.mRegion.Show()
 
 	go a.tickElapsed(stop)
 	core.TunnelMonitor.Reset()
@@ -703,7 +847,17 @@ func (a *TrayApp) tickElapsed(stop <-chan struct{}) {
 			s := int(since.Seconds()) % 60
 			// Update tray tooltip only â€” the app window does not display elapsed
 			// time, so triggering a full window repaint every second is unnecessary.
-			systray.SetTooltip(fmt.Sprintf("ShortNerdCat â€” Connected  %02d:%02d:%02d", h, m, s))
+			systray.SetTooltip(fmt.Sprintf(T("tooltip_connected_fmt"), h, m, s))
+
+			// Uplink/downlink byte counter -- cheap by design (see
+			// SetBytesTickCallback), so unlike the elapsed-time display above
+			// it's fine to refresh this every second.
+			a.mu.Lock()
+			tick := a.onBytesTick
+			a.mu.Unlock()
+			if tick != nil {
+				tick()
+			}
 		}
 	}
 }
@@ -716,11 +870,13 @@ func (a *TrayApp) doDisconnect(autoReconnect bool) {
 		a.mu.Unlock()
 		select {
 		case <-a.reconnectCh:
-			core.Log.Printf("disconnect: drained stale reconnectCh message")
+			logevent.Emit(binlog.TagSystem, logevent.EventWinTrayDisconnect, logevent.Str(logevent.AttrStage, "drained_stale"))
 		default:
 		}
 	}
-	core.Log.Printf("disconnect: starting (autoReconnect=%v)", autoReconnect)
+	logevent.Emit(binlog.TagSystem, logevent.EventWinTrayDisconnect,
+		logevent.Str(logevent.AttrStage, "starting"),
+		logevent.Str(logevent.AttrDetail, fmt.Sprintf("autoReconnect=%v", autoReconnect)))
 	a.mu.Lock()
 	if !a.connected {
 		// A connect attempt may be in progress â€” flag it so doConnect tears
@@ -730,9 +886,11 @@ func (a *TrayApp) doDisconnect(autoReconnect bool) {
 			a.reconnectAfterPending = true
 		}
 		a.mu.Unlock()
-		core.Log.Printf("disconnect: not connected â€” setting disconnectPending (reconnect=%v), hiding mDisconnect", autoReconnect)
+		logevent.Emit(binlog.TagSystem, logevent.EventWinTrayDisconnect,
+			logevent.Str(logevent.AttrStage, "not_connected_pending"),
+			logevent.Str(logevent.AttrDetail, fmt.Sprintf("reconnect=%v", autoReconnect)))
 		a.mDisconnect.Hide()
-		systray.SetTooltip("ShortNerdCat â€” Cancellingâ€¦")
+		systray.SetTooltip(T("tooltip_cancelling"))
 		// Notify the window so it doesn't show a stale state.
 		a.callStatusChange()
 		return
@@ -747,16 +905,16 @@ func (a *TrayApp) doDisconnect(autoReconnect bool) {
 		a.stopTick = nil
 	}
 	a.mu.Unlock()
-	core.Log.Printf("disconnect: connectedâ†’disconnecting")
+	logevent.Emit(binlog.TagSystem, logevent.EventWinTrayDisconnect, logevent.Str(logevent.AttrStage, "connecting_to_disconnecting"))
 	a.callStatusChange()
 
 	if !quitting {
 		// Disconnecting state: connecting icon, no action items available.
 		// When quitting, the caller manages the icon (blinking gray).
 		a.setTrayIcon(icoConnecting, "")
-		systray.SetTooltip("ShortNerdCat â€” Disconnectingâ€¦")
+		systray.SetTooltip(T("tooltip_disconnecting"))
 	}
-	core.Log.Printf("disconnect: hiding all action items")
+	logevent.Emit(binlog.TagSystem, logevent.EventWinTrayDisconnect, logevent.Str(logevent.AttrStage, "hiding_actions"))
 	a.mConnect.Hide()
 	a.mDisconnect.Hide()
 	a.mLogout.Hide()
@@ -772,13 +930,15 @@ func (a *TrayApp) doDisconnect(autoReconnect bool) {
 	select {
 	case <-disconnDone:
 	case <-time.After(disconnectDeadline):
-		core.Log.Printf("disconnect: onDisconnect hung for %v â€” forcing UI reset", disconnectDeadline)
+		logevent.Emit(binlog.TagSystem, logevent.EventWinTrayDisconnect,
+			logevent.Str(logevent.AttrStage, "hung_forcing_reset"),
+			logevent.Str(logevent.AttrDetail, disconnectDeadline.String()))
 	}
 
 	a.mu.Lock()
 	a.disconnecting = false
 	a.mu.Unlock()
-	core.Log.Printf("disconnect: done â€” disconnecting cleared")
+	logevent.Emit(binlog.TagSystem, logevent.EventWinTrayDisconnect, logevent.Str(logevent.AttrStage, "done"))
 	if !autoReconnect {
 		// Only notify the UI on explicit user disconnect; auto-reconnect lets
 		// doConnect fire the next callStatusChange so the window skips "Disconnected".
@@ -788,15 +948,18 @@ func (a *TrayApp) doDisconnect(autoReconnect bool) {
 	if !quitting && !autoReconnect {
 		// Restore idle (disconnected) state only for explicit user disconnects.
 		// Auto-reconnects keep the connecting icon so the user never sees Disconnected.
-		core.Log.Printf("disconnect: restoring idle state (loggedIn=%v)", loggedIn)
+		logevent.Emit(binlog.TagSystem, logevent.EventWinTrayDisconnect,
+			logevent.Str(logevent.AttrStage, "restoring_idle"),
+			logevent.Str(logevent.AttrDetail, fmt.Sprintf("loggedIn=%v", loggedIn)))
 		a.setTrayIcon(icoIdle, "")
-		systray.SetTooltip("ShortNerdCat")
+		systray.SetTooltip(T("app_title"))
 		if loggedIn {
-			core.Log.Printf("disconnect: showing mConnect")
+			logevent.Emit(binlog.TagSystem, logevent.EventWinTrayDisconnect, logevent.Str(logevent.AttrStage, "showing_connect"))
 			a.mConnect.Show()
 			a.mLogout.Show()
 			a.mDNSOverHTTPS.Show()
 			a.mBlockQUIC.Show()
+			a.mWildcat.Show()
 			a.mRegion.Show()
 		}
 	}
@@ -875,9 +1038,11 @@ func (a *TrayApp) ShowLoginError() {
 		a.onDisconnect(false) // full user-visible disconnect â€” removes firewall rule
 	}
 
-	core.Log.Printf("tray: entering error state â€” Login error (wasConnected=%v), re-prompting for login", wasConnected)
-	a.setTrayIcon(icoError, "Login error — your key was rejected")
-	systray.SetTooltip("ShortNerdCat â€” Login error")
+	logevent.Emit(binlog.TagSystem, logevent.EventWinTrayState,
+		logevent.Str(logevent.AttrStage, "login_error"),
+		logevent.Str(logevent.AttrDetail, fmt.Sprintf("wasConnected=%v", wasConnected)))
+	a.setTrayIcon(icoError, T("err_login_rejected"))
+	systray.SetTooltip(T("tooltip_login_error"))
 	a.mDisconnect.Hide()
 	a.mConnect.Hide()
 	// Keep mLogin available in case the user cancels the dialog below --
@@ -885,7 +1050,7 @@ func (a *TrayApp) ShowLoginError() {
 	// failure path doesn't touch menu visibility, so without this a
 	// cancelled/failed re-login would leave no menu item able to retry.
 	a.mLogin.Show()
-	ShowError("Your ShortNerdCat key was rejected by the server and can no longer be used.\n\nPlease log in again.")
+	ShowError(T("err_key_rejected_msg"))
 	a.mu.Lock()
 	a.loggedIn = false
 	a.mu.Unlock()
@@ -904,7 +1069,7 @@ func (a *TrayApp) TriggerReconnect() {
 	ud := a.userDisconnected
 	a.mu.Unlock()
 	if ud {
-		core.Log.Printf("tray: TriggerReconnect suppressed (user-disconnected)")
+		logevent.Emit(binlog.TagSystem, logevent.EventWinTrayState, logevent.Str(logevent.AttrStage, "reconnect_suppressed"))
 		return
 	}
 	select {
@@ -940,7 +1105,9 @@ func (a *TrayApp) onPowerWake() {
 	since := now.Sub(a.lastWakeReconnect)
 	if since < wakeReconnectDebounce {
 		a.mu.Unlock()
-		core.Log.Printf("tray: onPowerWake debounced (%.1fs since last wake reconnect)", since.Seconds())
+		logevent.Emit(binlog.TagSystem, logevent.EventWinTrayState,
+			logevent.Str(logevent.AttrStage, "power_wake_debounced"),
+			logevent.Str(logevent.AttrDetail, fmt.Sprintf("%.1fs", since.Seconds())))
 		return
 	}
 	a.lastWakeReconnect = now
@@ -948,7 +1115,7 @@ func (a *TrayApp) onPowerWake() {
 	a.mu.Unlock()
 
 	if hc != nil && hc() {
-		core.Log.Printf("tray: onPowerWake — tunnel still healthy, skipping reconnect")
+		logevent.Emit(binlog.TagSystem, logevent.EventWinTrayState, logevent.Str(logevent.AttrStage, "power_wake_healthy_skip"))
 		return
 	}
 
@@ -984,7 +1151,7 @@ func (a *TrayApp) SetAuthWarning(msg string) {
 		return
 	}
 	a.setTrayIcon(icoConnecting, "")
-	systray.SetTooltip("ShortNerdCat â€” " + msg)
+	systray.SetTooltip(T("app_title_dash_prefix") + msg)
 }
 
 // ClearAuthWarning restores the tray to the normal connected state after a
@@ -1002,7 +1169,7 @@ func (a *TrayApp) ClearAuthWarning() {
 	m := int(since.Minutes()) % 60
 	s := int(since.Seconds()) % 60
 	a.setTrayIcon(a.connectedIcon(), "")
-	systray.SetTooltip(fmt.Sprintf("ShortNerdCat â€” Connected  %02d:%02d:%02d", h, m, s))
+	systray.SetTooltip(fmt.Sprintf(T("tooltip_connected_fmt"), h, m, s))
 }
 
 // TriggerConnect queues a connect action from the app window.
@@ -1064,7 +1231,7 @@ func (a *TrayApp) doQuit() {
 
 	// Blink gray icon for the entire quit/disconnect sequence so the
 	// user sees progress even if the tray appears frozen.
-	systray.SetTooltip("ShortNerdCat â€” Quittingâ€¦")
+	systray.SetTooltip(T("tooltip_quitting"))
 	blinkStop := make(chan struct{})
 	go func() {
 		dim := true
@@ -1095,7 +1262,7 @@ func (a *TrayApp) doQuit() {
 	select {
 	case <-done:
 	case <-time.After(30 * time.Second):
-		core.Log.Printf("quit: disconnect timed out â€” forcing exit")
+		logevent.Emit(binlog.TagSystem, logevent.EventWinTrayState, logevent.Str(logevent.AttrStage, "quit_disconnect_timeout"))
 		SignalCleanShutdown()
 		close(blinkStop)
 		os.Exit(0)
@@ -1126,7 +1293,7 @@ func (a *TrayApp) TriggerUpdateInstall() {
 		if core.ApplyPendingUpdate() {
 			return // install started (or handed off); this process is on its way out
 		}
-		core.Log.Printf("tray: update trigger found nothing to apply -- resetting ready state")
+		logevent.Emit(binlog.TagSystem, logevent.EventWinTrayState, logevent.Str(logevent.AttrStage, "update_reset"))
 		a.mu.Lock()
 		a.updateReady = false
 		a.mu.Unlock()
@@ -1175,6 +1342,37 @@ func (a *TrayApp) SetStatusCallback(fn func()) {
 	a.mu.Unlock()
 }
 
+// SetBytesTickCallback registers a function called about once per second
+// while connected (see tickElapsed), for a lightweight uplink/downlink
+// counter refresh that shouldn't pay for a full status repaint every tick.
+func (a *TrayApp) SetBytesTickCallback(fn func()) {
+	a.mu.Lock()
+	a.onBytesTick = fn
+	a.mu.Unlock()
+}
+
+// SetSettingsChangeCallback registers a function called whenever a settings
+// toggle changes via the tray's own context menu (DoH, BlockQUIC, WildCat,
+// region) -- the one direction of sync that had no path back to the window
+// at all. See onSettingsChange's doc comment for the incident this fixes.
+func (a *TrayApp) SetSettingsChangeCallback(fn func()) {
+	a.mu.Lock()
+	a.onSettingsChange = fn
+	a.mu.Unlock()
+}
+
+// notifySettingsChange fires onSettingsChange in a goroutine if it is set.
+// Call after every tray-menu settings mutation (DoH/BlockQUIC/WildCat/
+// region), mirroring callStatusChange's fire-and-forget shape.
+func (a *TrayApp) notifySettingsChange() {
+	a.mu.Lock()
+	fn := a.onSettingsChange
+	a.mu.Unlock()
+	if fn != nil {
+		go fn()
+	}
+}
+
 // callStatusChange fires onStatusChange in a goroutine if it is set.
 func (a *TrayApp) callStatusChange() {
 	a.mu.Lock()
@@ -1183,7 +1381,10 @@ func (a *TrayApp) callStatusChange() {
 	connecting := a.connecting
 	disconnecting := a.disconnecting
 	a.mu.Unlock()
-	core.Log.Printf("tray: callStatusChange connected=%v connecting=%v disconnecting=%v fn=%v", connected, connecting, disconnecting, fn != nil)
+	logevent.Emit(binlog.TagSystem, logevent.EventWinTrayState,
+		logevent.Str(logevent.AttrStage, "status_change"),
+		logevent.Str(logevent.AttrDetail, fmt.Sprintf("connected=%v connecting=%v disconnecting=%v fn=%v", connected, connecting, disconnecting, fn != nil)))
+	a.refreshBlockQUICVisibility()
 	if fn != nil {
 		go fn()
 	}
@@ -1199,14 +1400,18 @@ func (a *TrayApp) GetAppStatus() AppStatus {
 	at := a.connectedAt
 	a.mu.Unlock()
 
-	s := AppStatus{Connected: connected, Connecting: connecting, Disconnecting: disconnecting, Error: errorMsg != "", ErrorMsg: errorMsg}
+	s := AppStatus{Connected: connected, Connecting: connecting, Disconnecting: disconnecting, Error: errorMsg != "", ErrorMsg: errorMsg, QUICLocked: a.IsWildcatQUICLocked()}
 	if connected {
 		since := time.Since(at)
 		h := int(since.Hours())
 		m := int(since.Minutes()) % 60
 		sec := int(since.Seconds()) % 60
 		s.Elapsed = fmt.Sprintf("%02d:%02d:%02d", h, m, sec)
-		s.Mode = "direct"
+		if a.IsWildcatEnabled() {
+			s.Mode = "wildcat"
+		} else {
+			s.Mode = "direct"
+		}
 	}
 	return s
 }
@@ -1217,6 +1422,7 @@ func (a *TrayApp) GetAppSettings() AppSettings {
 		DoH:       a.IsDNSOverHTTPSEnabled(),
 		BlockQUIC: a.IsBlockQUICEnabled(),
 		Region:    a.GetPreferredRegion(),
+		WildCat:   a.IsWildcatEnabled(),
 	}
 }
 
@@ -1249,6 +1455,20 @@ func (a *TrayApp) ApplyWindowSettings(s AppSettings) {
 		if a.onBlockQUICChange != nil {
 			a.onBlockQUICChange(s.BlockQUIC)
 		}
+	}
+	// WildCat
+	if s.WildCat != a.IsWildcatEnabled() {
+		if a.mWildcat != nil {
+			if s.WildCat {
+				a.mWildcat.Check()
+			} else {
+				a.mWildcat.Uncheck()
+			}
+		}
+		if a.onWildcatChange != nil {
+			a.onWildcatChange(s.WildCat)
+		}
+		a.refreshBlockQUICVisibility()
 	}
 	// Region
 	if s.Region != a.GetPreferredRegion() {
@@ -1296,7 +1516,7 @@ func (a *TrayApp) runWatchdog(stop <-chan struct{}) {
 		}
 
 		if core.TunnelMonitor.IsStuck() {
-			core.Log.Printf("watchdog: tunnel stuck â€” outbound payload with no inbound response â€” requesting reconnect")
+			logevent.Emit(binlog.TagSystem, logevent.EventWinTrayState, logevent.Str(logevent.AttrStage, "watchdog_stuck"))
 			// Use TriggerReconnect (not a direct reconnectCh send) so the
 			// userDisconnected guard is respected: if the user clicked Disconnect
 			// at the same moment the timer fired, we must not override that.
@@ -1326,9 +1546,9 @@ func (a *TrayApp) enterErrorState() {
 	}
 	a.onDisconnect(true) // automatic teardown â€” auto-reconnect follows via reconnectCh
 
-	core.Log.Printf("tray: entering error state â€” connection lost (watchdog/enterErrorState)")
-	a.setTrayIcon(icoError, "Connection lost")
-	systray.SetTooltip("ShortNerdCat â€” Connection lost")
+	logevent.Emit(binlog.TagSystem, logevent.EventWinTrayState, logevent.Str(logevent.AttrStage, "error_state_connection_lost"))
+	a.setTrayIcon(icoError, T("err_connection_lost"))
+	systray.SetTooltip(T("tooltip_connection_lost"))
 	a.mDisconnect.Hide()
 	a.mConnect.Show()
 }

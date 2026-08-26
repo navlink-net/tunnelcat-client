@@ -46,6 +46,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"shortnerdcat/snc/shared/keymigrate"
 	androidcore "tunnel_cat/android-core"
 	snc "tunnel_cat/snc/core"
 )
@@ -55,6 +56,15 @@ import (
 // once per process, even though the setup path that starts it can run
 // multiple times over the process's life (reconnects).
 var bananameterProberOnce sync.Once
+
+// minPoolControls/maxPoolControls mirror core.MinPoolControls/MaxPoolControls
+// (this file's own top-up/cap logic, applied after e2e probing, needs the
+// same bounds) -- both get overridden together from SNC_MIN_POOL_CONTROLS/
+// SNC_MAX_POOL_CONTROLS if CoreProcess.kt sets them. Defaults match core's.
+var (
+	minPoolControls = 5
+	maxPoolControls = 12
+)
 
 // globalDisc is the single Discoverer instance for the lifetime of the process.
 // Initialised once via discOnce so that early startup and the tunnel-connect
@@ -78,11 +88,14 @@ var (
 var lastKotlinHeartbeatUnix int64 // atomic unix seconds
 
 // swapPoolGrowOnly applies nd to pool, unless doing so would shrink it.
-// Every rebuild trigger (manifest update, dataFail, the periodic refresh
-// timer) calls buildPoolDialers again, so blindly swapping each smaller
-// candidate result in here regresses an already-healthy multi-dialer pool
-// down to a single dialer repeatedly throughout the session -- confirmed in
-// the field as session-wide slowdowns and total
+// WildCat's buildPoolDialers can return an early, partial dialer list (by
+// design -- see its own comment on the authCh loop) while a background
+// goroutine keeps resolving the rest and swaps in the complete list a
+// moment later. Every rebuild trigger (manifest update, dataFail, the
+// periodic refresh timer) calls buildPoolDialers again, so blindly
+// swapping each partial result in here regresses an already-healthy
+// multi-dialer pool down to a single dialer repeatedly throughout the
+// session -- confirmed in the field as session-wide slowdowns and total
 // stalls on whichever site happened to be loading through that one dialer
 // at the time. Confirmed-dead dialers are pruned via pool.Evict() directly
 // (from FirstFailHook/DataFailHook), independent of this function, so
@@ -145,6 +158,26 @@ func main() {
 		}
 	}
 
+	// Apply RAM-scaled control pool bounds from env (CoreProcess.kt derives
+	// both from device RAM the same way it already derives GOMEMLIMIT/
+	// ChanDepth). minPoolControls/maxPoolControls below (this file's own
+	// top-up/cap logic) and core.MinPoolControls/MaxPoolControls (router.go's
+	// matching bounds) must move together -- see their doc comments.
+	if v := os.Getenv("SNC_MIN_POOL_CONTROLS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			minPoolControls = n
+			snc.MinPoolControls = n
+			snc.Log.Printf("snc-core: min pool controls=%d", n)
+		}
+	}
+	if v := os.Getenv("SNC_MAX_POOL_CONTROLS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			maxPoolControls = n
+			snc.MaxPoolControls = n
+			snc.Log.Printf("snc-core: max pool controls=%d", n)
+		}
+	}
+
 	// Leave 2 CPU cores free for Android system processes on devices with more than 4 cores.
 	// Without this limit Go uses all cores, starving the kernel scheduler and modem threads
 	// under heavy tunnel load, which can trigger thermal throttling or a watchdog reboot.
@@ -153,13 +186,15 @@ func main() {
 		snc.Log.Printf("snc-core: GOMAXPROCS=%d (CPUs=%d, 2 reserved for system)", n-2, n)
 	}
 
-	// In proxy-only mode (SNC_PROXY_ONLY=1) there is no TUN â€” pure SOCKS5 proxy for embedding.
+	// In warmup-only mode (SNC_WARMUP_ONLY=1) there is no TUN fd; Kotlin passes -1.
+	// In proxy-only mode (SNC_PROXY_ONLY=1) there is also no TUN â€” pure SOCKS5 proxy for embedding.
+	isWarmupOnly := os.Getenv("SNC_WARMUP_ONLY") == "1"
 	isProxyOnly := os.Getenv("SNC_PROXY_ONLY") == "1"
 	// Connection-stats admin-dashboard feature (see core.ConnStatsCollector):
 	// set by SNCVpnService.kt/CoreProcess.kt when this process launch was NOT
 	// a genuine user-initiated connect (internal reconnect, sticky restart).
 	autoReconnect := os.Getenv("SNC_AUTO_RECONNECT") == "1"
-	if keyStr == "" || (tunFDStr == "" && !isProxyOnly) {
+	if keyStr == "" || (tunFDStr == "" && !isWarmupOnly && !isProxyOnly) {
 		snc.Log.Printf("snc-core: SNC_KEY and SNC_TUN_FD are required")
 		writeState(dataDir, "key_error")
 		os.Exit(1)
@@ -177,9 +212,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	// router is declared here (before kd parsing) so it's available to
-	// closures defined ahead of its assignment; assigned via snc.NewRouter()
-	// at line ~636.
+	// wildcatMode toggles WildCat mode; retained for the IPC surface and
+	// stats plumbing even though the covert-relay transport itself is not
+	// part of this build.
+	var wildcatMode int32
 	var router *snc.Router
 	// connStatsCollector lives for the whole process, not per-connect --
 	// its event counters must accumulate across reconnects and only get
@@ -187,7 +223,6 @@ func main() {
 	// Unlike router it has no deferred-assignment dependency, so it's
 	// created immediately rather than left nil until later.
 	connStatsCollector := snc.NewConnStatsCollector(filepath.Join(dataDir, "connstats.json"))
-
 	// Install protect hook before any socket is opened.
 	protectWatchdogStop := make(chan struct{})
 	uidWatchdogStop := make(chan struct{})
@@ -196,8 +231,8 @@ func main() {
 		if err := connectProtectWithRetry(protectSock); err != nil {
 			if tunFD >= 0 {
 				// With a live TUN, every unprotected socket loops back through it
-				// (routing loop) and dials never complete â€” the tunnel would be
-				// permanently stuck with no way to recover within this process.
+				// (routing loop) and dials never complete â€” WildCat/the tunnel would
+				// be permanently stuck with no way to recover within this process.
 				// Exit so Kotlin tears down and restarts us with a fresh protect
 				// socket rather than limping along unprotected forever.
 				snc.Log.Printf("snc-core: protect socket: %v â€” exiting so Kotlin restarts us with a fresh socket", err)
@@ -247,7 +282,7 @@ func main() {
 	//     (transparent DNS proxy) while leaving TCP:53 open.
 	//   Normal (VPN TUN active): TCP-only via protected sockets â€” Android blocks UDP
 	//     socket creation (EPERM) in VPN subprocesses.
-	if isProxyOnly {
+	if isWarmupOnly || isProxyOnly {
 		net.DefaultResolver = &net.Resolver{
 			PreferGo: true,
 			Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
@@ -349,6 +384,40 @@ func main() {
 		snc.Log.Printf("snc-core: key contains no server addresses")
 		writeState(dataDir, "key_error")
 		os.Exit(1)
+	}
+
+	// Legacy (V1, unsigned) key: its ControlNodes/Servers list is not
+	// verifiable (see snc/shared/keymigrate's doc comment), so it must not
+	// be dialed as-is. Migrate first; on failure, treat this like any other
+	// key rejection -- do NOT fall back to using its own (unverifiable)
+	// node list. Kotlin picks up the new key via snc.migrated_key (see
+	// writeMigratedKey) and persists it so future launches start on V2
+	// directly instead of re-migrating every time.
+	if kd.IsLegacy() {
+		snc.Log.Printf("snc-core: legacy V1 key detected for %s, migrating to V2", kd.Username)
+		migCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		newKeyStr, newKD, migErr := keymigrate.Migrate(migCtx, kd)
+		cancel()
+		if migErr != nil {
+			snc.Log.Printf("snc-core: legacy key migration failed: %v", migErr)
+			writeState(dataDir, "key_error")
+			os.Exit(1)
+		}
+		snc.Log.Printf("snc-core: legacy key migrated OK, key_id=%s", newKD.KeyID)
+		writeMigratedKey(dataDir, newKeyStr)
+		keyStr = newKeyStr
+		kd = newKD
+	}
+	// Warmup-only mode: fetch credentials before the VPN TUN is established.
+	// Kotlin starts this process first (SNC_WARMUP_ONLY=1, no SNC_TUN_FD) so the
+	// credential pool can be read while WebView still has direct internet access.
+	if os.Getenv("SNC_WARMUP_ONLY") == "1" {
+		if ipcSock != "" {
+			go serveIPC(ipcSock, &runState{dataDir: dataDir})
+		}
+		snc.Log.Printf("snc-core: warmup OK â€” credentials cached")
+		_ = os.Remove(filepath.Join(dataDir, "warmup-error.txt"))
+		os.Exit(0)
 	}
 	// SNC_CC is set by the Kotlin layer before launching this process.
 	// It carries the device's physical country code detected via GPS,
@@ -493,7 +562,10 @@ func main() {
 		for i, url := range candidates {
 			go func(i int, url string) {
 				snc.Log.Printf("snc-core: bootstrap %s=%s (node %d/%d)", label, url, i+1, len(candidates))
-				androidcore.ProbeTCP(androidcore.ProbeAddr(strings.TrimPrefix(url, "https://")))
+				// Skip direct TCP probe in WildCat mode â€” all direct TCP is blocked there.
+				if atomic.LoadInt32(&wildcatMode) == 0 {
+					androidcore.ProbeTCP(androidcore.ProbeAddr(strings.TrimPrefix(url, "https://")))
+				}
 				a := snc.NewAuthenticator(url, kd.APIKey, kd.Username, kd.Password)
 				a.SetKeyAuth(kd)
 				a.SetDeviceInfo(kd.KeyID, deviceID, "Android")
@@ -669,7 +741,7 @@ func main() {
 			} else {
 				denialStreak = 0
 				if isProxyOnly {
-					// Proxy-only: no retry loop â€” exit so SncProxyManager can switch strategy.
+					// Proxy-only: no retry loop â€” exit so SncProxyManager can switch to WildCat.
 					snc.Log.Printf("snc-core: proxy-only: all controls unreachable â€” writing no_controls and exiting")
 					writeVPNState("no_controls")
 					os.Exit(0)
@@ -727,14 +799,14 @@ func main() {
 			bm.Start()
 			// Disable regional (CIDR/home-TLD) bypass entirely, via the "Disable
 			// regional bypass" menu toggle -- SNC_DISABLE_BYPASS=1. LAN addresses
-			// are unaffected: they are decided independently of
-			// BypassManager.Enabled() at the SOCKS5/UDP call sites
-			// (isLANAddress), never routed through ShouldBypass at all, so they
-			// stay bypassed even with this on -- "system-necessary" bypass, per
-			// the toggle's intent.
+			// and WildCat's own direct-dial hosts are unaffected: both are decided
+			// independently of BypassManager.Enabled() at the SOCKS5/UDP call
+			// sites (isLANAddress / isWildcatDirectHost), never routed through
+			// ShouldBypass at all, so they stay bypassed even with this on --
+			// "system-necessary" bypass, per the toggle's intent.
 			if os.Getenv("SNC_DISABLE_BYPASS") == "1" {
 				bm.SetEnabled(false)
-				snc.Log.Printf("snc-core: regional bypass disabled by user (SNC_DISABLE_BYPASS=1); LAN exceptions still apply")
+				snc.Log.Printf("snc-core: regional bypass disabled by user (SNC_DISABLE_BYPASS=1); LAN/WildCat-direct exceptions still apply")
 			}
 			bypass = bm
 			// Write cidr_status immediately so the Kotlin UI sees the correct dot color
@@ -886,7 +958,13 @@ func main() {
 			}
 		}()
 	}
-	router.ProbeDataPlane(5 * time.Second)
+	// In WildCat mode all direct TCP to control nodes is blocked â€” skip the
+	// initial data-plane probe entirely; buildPoolDialers handles WildCat auth.
+	// Running ProbeDataPlane in WildCat mode would generate TCP connection
+	// attempts that all timeout, wasting 5 seconds and filling the log with noise.
+	if atomic.LoadInt32(&wildcatMode) == 0 {
+		router.ProbeDataPlane(5 * time.Second)
+	}
 	router.BuildPaths()
 
 	// dataFailCh is signalled by the data-plane failure hook (below) to trigger
@@ -907,6 +985,36 @@ func main() {
 	// next process a clean slate without alarming the user.
 	const exitCodeStallRestart = 100
 
+	// noControlsRestartDelay picks the pre-exit sleep for a zero-available-
+	// controls restart, per explicit product direction (2026-08-23): a full
+	// silent reconnect every time we hit zero controls, at a slower cadence
+	// (5 min) if the router still sees at least one control alive via ANY
+	// transport (TCP or UDP -- e2e exit-probing failed for all of them, but
+	// the control channel itself answered), or faster (1 min) if literally
+	// nothing answered at all. The sleep happens here, inside the dying
+	// process, before os.Exit -- Kotlin's silent-reconnect relaunch fires
+	// immediately once this process exits (see AndroidVpnReconnectDecision),
+	// so without this delay a persistently dead network would busy-loop
+	// restart as fast as each probe round-trip allows.
+	noControlsRestartDelay := func(anyAliveTransport bool) time.Duration {
+		if anyAliveTransport {
+			return 5 * time.Minute
+		}
+		return 1 * time.Minute
+	}
+
+	// restartOnNoControls performs the delayed, silent full reconnect described
+	// above and never returns (os.Exit). qualAddrs is whatever the router
+	// currently considers alive via any transport, TCP or UDP -- see
+	// Router.QualifyingControlAddrs's doc comment.
+	restartOnNoControls := func(qualAddrs []string) {
+		delay := noControlsRestartDelay(len(qualAddrs) > 0)
+		snc.Log.Printf("snc-core: no controls available (transport-alive=%d) â€” full reconnect in %s",
+			len(qualAddrs), delay)
+		time.Sleep(delay)
+		os.Exit(exitCodeStallRestart)
+	}
+
 	// bootstrapDialer is the persistent fallback dialer used when all control
 	// auth attempts fail. Reusing the same object across pool rebuilds means
 	// existing udp-assoc sessions keep their reference without interruption.
@@ -926,6 +1034,11 @@ func main() {
 
 	// Auth to all qualifying controls in parallel, return dialers slice.
 	// Falls back to bootstrapAuth when no controls pass the e2e probe.
+
+	// Forward-declared (see wireTorrent/upd elsewhere in this file for the
+	// same pattern): buildPoolDialers below is defined before clubSt is
+	// assigned further down, but the closures need to read it once set.
+	var clubSt *clubState
 
 	buildPoolDialers := func() []*snc.TunnelDialer {
 		qualAddrs := router.QualifyingControlAddrs()
@@ -951,7 +1064,7 @@ func main() {
 				var rtt time.Duration
 				var ok bool
 				if router.ControlTransportName(addr) == "udp" {
-					rtt, ok = snc.ProbeControlUDP(addr, 4*time.Second)
+					rtt, ok = snc.ProbeControlQUIC(addr, 4*time.Second)
 				} else {
 					rtt, ok = snc.ProbeControlE2E(addr, 4*time.Second)
 				}
@@ -981,13 +1094,11 @@ func main() {
 			}
 			return ri < rj
 		})
-		// Cap at 12: enough headroom to spread load across every qualifying
-		// control instead of concentrating it on whichever 2-5 happen to
-		// have the best RTT at rebuild time (see snc/core/router.go's
-		// matching minPoolControls/maxPoolControls bounds).
-		if len(viableAddrs) > 12 {
-			viableAddrs = viableAddrs[:12]
-		}
+		// Cap at maxPoolControls, guaranteeing real TCP/QUIC diversity in the
+		// pool instead of a plain RTT-sort cap -- see BalanceByTransport's
+		// doc comment for why a pure RTT sort can silently fill the whole
+		// pool with one transport and leave no redundancy when it degrades.
+		viableAddrs = router.BalanceByTransport(viableAddrs, maxPoolControls)
 
 		// Relay second-pass: for controls unreachable directly but reachable via a
 		// hole-punched relay peer (path.UDPRelay != nil), build a UDPRelayDialer now
@@ -1028,14 +1139,14 @@ func main() {
 			}
 		}
 
-		// Top-up: if in-country viable controls < 5, probe out-of-country controls to fill the gap.
+		// Top-up: if in-country viable controls < minPoolControls, probe out-of-country controls to fill the gap.
 		// Why top-up: the pool needs redundancy so that a single control going down
 		// during a session doesn't kill connectivity. With only 1-2 in-country controls
 		// available, losing one triggers an immediate rebuild that stalls traffic for
 		// several seconds. Out-of-country controls are slightly higher latency but
 		// fully functional; they serve as hot standbys rather than primaries.
 		// This also handles the stall case (viable=0) without a separate code path.
-		if len(viableAddrs) < 5 {
+		if len(viableAddrs) < minPoolControls {
 			ctrlAddrsMu.RLock()
 			allAddrs := ctrlAddrs
 			ctrlAddrsMu.RUnlock()
@@ -1050,7 +1161,7 @@ func main() {
 				}
 			}
 			if len(fallbackAddrs) > 0 {
-				need := 5 - len(viableAddrs)
+				need := minPoolControls - len(viableAddrs)
 				// Skip addresses that are in auth backoff (too many consecutive auth failures).
 				var activeFallbacks []string
 				for _, a := range fallbackAddrs {
@@ -1069,7 +1180,7 @@ func main() {
 							var rtt time.Duration
 							var ok bool
 							if router.ControlTransportName(addr) == "udp" {
-								rtt, ok = snc.ProbeControlUDP(addr, 4*time.Second)
+								rtt, ok = snc.ProbeControlQUIC(addr, 4*time.Second)
 							} else {
 								rtt, ok = snc.ProbeControlE2E(addr, 4*time.Second)
 							}
@@ -1116,17 +1227,19 @@ func main() {
 					os.Exit(0)
 				}
 				// Initial build only â€” cannot start a tunnel with zero controls.
-				snc.Log.Printf("snc-core: all controls e2e-dead â€” silent restart")
-				os.Exit(exitCodeStallRestart)
+				restartOnNoControls(qualAddrs)
 			}
 			if isProxyOnly {
 				snc.Log.Printf("snc-core: proxy-only: all controls e2e-dead â€” writing no_controls and exiting")
 				writeVPNState("no_controls")
 				os.Exit(0)
 			}
-			// Rebuild: keep the current pool alive; the refresh goroutine will
-			// retry on the next cycle (refreshFast = 60 s).
-			snc.Log.Printf("snc-core: all controls e2e-dead â€” keeping current pool alive, will retry")
+			// Rebuild: an already-connected session just dropped to zero
+			// e2e-viable controls â€” force the same full silent reconnect as the
+			// initial-build case above instead of passively waiting for the
+			// next refresh tick. Explicit product direction (2026-08-23): zero
+			// controls must always trigger a reconnect, not a passive retry.
+			restartOnNoControls(qualAddrs)
 			return nil
 		}
 
@@ -1538,8 +1651,18 @@ func main() {
 	}
 	pool = snc.NewDialerPool(buildPoolDialers())
 	connStatsCollector.IncConnect(!autoReconnect)
+	// wildcatMode is decided once, at connect time -- not something that
+	// flips mid-session, so it's safe to read here to start the
+	// session-duration clock. If the "disconnect" IPC handler never runs
+	// (Kotlin's stopVpn kills this process racing the IPC send -- see its
+	// own comment), the persisted-state orphaned-session fallback in
+	// NewConnStatsCollector resolves it as failed on the next process start
+	// instead of losing it.
+	if atomic.LoadInt32(&wildcatMode) != 0 {
+		connStatsCollector.StartWildcatSession()
+	}
 
-	clubSt := newClubState(kd.IsAdmin)
+	clubSt = newClubState(kd.IsAdmin)
 	initClubDiscovery(bootstrapURL, kd, bootstrapAuth.Token, clubSt)
 
 	// Widen manifest-fetch candidates beyond the last-cached (≤12-node)
@@ -1557,9 +1680,44 @@ func main() {
 		globalDisc.SetNavlinkFallback(func() string { return "" }, androidcore.Protect.DialControl, snc.DefaultClientTelemetryKey)
 	}
 
+	// Manifest topup (see tunnel_cat/snc/core/manifest_topup.go): on-demand,
+	// one-node-at-a-time supplement to the manifest, reachable at
+	// navlink.net directly (bypassing TUN via VpnService.protect(), same
+	// pair as SetNavlinkFallback just above) regardless of connect state.
+	// This process is one-shot per VPN session (see the "Launched by
+	// Kotlin's SNCVpnService as a subprocess" doc comment at the top of this
+	// file), so a single TopupClient for the process lifetime is enough --
+	// no relogin loop to race against, unlike the Windows client.
+	topupClient := snc.NewTopupClientFromKey("https://navlink.net", kd, func() string { return "" }, androidcore.Protect.DialControl)
+	runTopup := func() {
+		if router == nil {
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		topupClient.Run(ctx,
+			router.AllControlAddrs,
+			func() int { return len(router.QualifyingControlAddrs()) },
+			func(addr string) bool { return snc.QuickHealthCheck(addr, 5*time.Second) },
+			func(addr string) {
+				router.AddControl(addr)
+				router.BuildPaths()
+				snc.Log.Printf("manifest-topup: added control %s to router", addr)
+			},
+		)
+	}
+	go runTopup()
+	go func() {
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		for range ticker.C {
+			runTopup()
+		}
+	}()
+
 	// BananaMeter tunnel-diagnostics probe (see TODO.md "BananaMeter-based
-	// tunnel diagnostics"): started once per process; reads pool fresh on
-	// every tick, so it survives reconnects and pool swaps on its own.
+	// tunnel diagnostics"): started once per process; reads pool/wildcatMode
+	// fresh on every tick, so it survives reconnects and pool swaps on its own.
 	bananameterProberOnce.Do(func() {
 		if kd != nil {
 			prober := snc.NewBananameterProber(snc.DefaultBananameterCreds(), kd.ClientID, deviceID, kd.Username)
@@ -1570,7 +1728,9 @@ func main() {
 					}
 					return pool.Pick()
 				},
-				func() bool { return false },
+				func() bool {
+					return atomic.LoadInt32(&wildcatMode) != 0
+				},
 			)
 		}
 	})
@@ -1586,12 +1746,18 @@ func main() {
 	// payload inspection. Mixing in traffic to Google, Cloudflare, etc. makes the
 	// traffic profile indistinguishable from that of a regular browser.
 	// Connections are protected via dialControl (bypass TUN), not LocalAddr-bound.
+	// In WildCat mode decoy is skipped â€” the mux batch pattern already provides
+	// traffic camouflage, and decoy adds unnecessary network activity.
 	var decoyMgrStop func()
-	if !isProxyOnly {
+	if isProxyOnly {
+		// No decoy traffic in proxy-only mode â€” no TUN pattern to obscure.
+	} else {
 		dm := snc.NewDecoyManagerWithTransport(snc.NewDecoyTransport("", androidcore.Protect.DialControl))
-		pool.SetActivityHook(dm.MarkActivity)
-		dm.Start()
-		decoyMgrStop = dm.Stop
+		if atomic.LoadInt32(&wildcatMode) == 0 {
+			pool.SetActivityHook(dm.MarkActivity)
+			dm.Start()
+			decoyMgrStop = dm.Stop
+		}
 	}
 
 	// srvURL: used for IPC status and log upload; bootstrapURL is always reachable.
@@ -1607,19 +1773,17 @@ func main() {
 		os.Exit(1)
 	}
 	socks5 := snc.NewSOCKS5ServerWithPool("", pool, bypass)
-	// Trial (2026-08-13, Android only): dedicated native-UDP dialer for
-	// general (non-DNS) UDP ASSOCIATE traffic -- voice/video call media,
-	// games, anything not otherwise DNS or bypassed. See the full
-	// rationale in socks5.RealtimeUDPDialer's doc comment (snc/core/
-	// socks5.go) and dialerFor's use of it (snc/core/udp_assoc.go).
-	// Best-effort -- normal pool-based UDP relay (today's behavior) is
-	// exactly what happens if this fails, nothing blocks on it.
-	if udpConn, uerr := snc.NewUDPControlConn(strings.TrimPrefix(bootstrapURL, "https://")); uerr == nil {
-		socks5.RealtimeUDPDialer = snc.NewUDPRelayDialer(udpConn, bootstrapAuth)
-		snc.Log.Printf("snc-core: realtime UDP trial dialer ready via %s", bootstrapURL)
-	} else {
-		snc.Log.Printf("snc-core: realtime UDP trial dialer unavailable (%v) -- falling back to pool", uerr)
-	}
+	// Trial (2026-08-13, Android only): dedicated direct-to-control dialer
+	// for general (non-DNS) UDP ASSOCIATE traffic -- voice/video call
+	// media, games, anything not otherwise DNS or bypassed. Backed by
+	// QUIC (see NewQUICRelayDialer, snc/core/quic_relay.go) rather than
+	// the old raw-SNCU native UDP path. See the full rationale in
+	// socks5.RealtimeUDPDialer's doc comment (snc/core/socks5.go) and
+	// dialerFor's use of it (snc/core/udp_assoc.go). Best-effort -- normal
+	// pool-based UDP relay (today's behavior) is exactly what happens if
+	// this fails, nothing blocks on it.
+	socks5.RealtimeUDPDialer = snc.NewQUICRelayDialer(strings.TrimPrefix(bootstrapURL, "https://"), bootstrapAuth)
+	snc.Log.Printf("snc-core: realtime UDP trial dialer ready via %s", bootstrapURL)
 	go socks5.Serve(socksLn) //nolint:errcheck
 	snc.Log.Printf("snc-core: SOCKS5 on %s", socksLn.Addr())
 	// Write SOCKS5 address to a file so the Android app can read the port.
@@ -1694,7 +1858,9 @@ func main() {
 				} else {
 					// Screen on â€” probe immediately so connections are fresh.
 					pool.DrainEvictions()
-					router.ProbeDataPlane(5 * time.Second)
+					if atomic.LoadInt32(&wildcatMode) == 0 {
+						router.ProbeDataPlane(5 * time.Second)
+					}
 					router.BuildPaths()
 					if nd := buildPoolDialers(); nd != nil {
 						swapPoolGrowOnly(pool, nd)
@@ -1705,7 +1871,9 @@ func main() {
 			case <-reconnectCh:
 				// Network change signalled from Kotlin â€” full probe immediately.
 				pool.DrainEvictions()
-				router.ProbeDataPlane(5 * time.Second)
+				if atomic.LoadInt32(&wildcatMode) == 0 {
+					router.ProbeDataPlane(5 * time.Second)
+				}
 				router.BuildPaths()
 				if nd := buildPoolDialers(); nd != nil {
 					swapPoolGrowOnly(pool, nd)
@@ -1716,7 +1884,9 @@ func main() {
 				// Data-plane failure detected by SetDataFailHook â€” dialer already
 				// evicted from pool; re-probe and rebuild without waiting for timer.
 				pool.DrainEvictions()
-				router.ProbeDataPlane(5 * time.Second)
+				if atomic.LoadInt32(&wildcatMode) == 0 {
+					router.ProbeDataPlane(5 * time.Second)
+				}
 				router.BuildPaths()
 				if nd := buildPoolDialers(); nd != nil {
 					swapPoolGrowOnly(pool, nd)
@@ -1741,10 +1911,15 @@ func main() {
 				// are alive after a failed probe.  Without the second condition, a
 				// single failed ProbeDataPlane leaves all controls marked not-alive
 				// indefinitely, since the timer skips the probe when there are no evictions.
-				noAliveControls := len(router.QualifyingControlAddrs()) == 0
+				// In WildCat mode, controls are unreachable via direct TCP â€” their
+				// status is irrelevant; skip both the noAliveControls check and the probe.
+				isWildcat := atomic.LoadInt32(&wildcatMode) != 0
+				noAliveControls := !isWildcat && len(router.QualifyingControlAddrs()) == 0
 				if pool.DrainEvictions() > 0 || noAliveControls {
 					// Lost dialers or no live controls â€” full probe to find healthy ones.
-					router.ProbeDataPlane(5 * time.Second)
+					if !isWildcat {
+						router.ProbeDataPlane(5 * time.Second)
+					}
 					resetTimer(refreshFast)
 				} else {
 					// All dialers alive â€” skip probe, only rebuild routing table.
@@ -1764,7 +1939,8 @@ func main() {
 					// Guard against a single bad probe collapsing all traffic onto
 					// one node: if the pool would shrink to <=1 from a larger set,
 					// wait 20 s and re-probe once before accepting the degraded list.
-					if len(newDialers) <= 1 && pool.Size() > 1 {
+					// In WildCat mode the pool is always 1 dialer â€” skip this guard.
+					if !isWildcat && len(newDialers) <= 1 && pool.Size() > 1 {
 						snc.Log.Printf("snc-core: pool shrink %d->%d, stabilising", pool.Size(), len(newDialers))
 						select {
 						case <-poolRefreshStop:
@@ -1892,8 +2068,10 @@ func main() {
 					}
 					dhtNode.SaveRelays(dhtRelaysPath) //nolint:errcheck
 					router.MergeDHTRelays(entries)
-					router.ProbeDataPlane(3 * time.Second)
-					router.BuildPaths()
+					if atomic.LoadInt32(&wildcatMode) == 0 {
+						router.ProbeDataPlane(3 * time.Second)
+						router.BuildPaths()
+					}
 
 					// Relay client: punch to new relays for blocked controls.
 					blockedCtrls := router.UnreachableControls()
@@ -1952,9 +2130,9 @@ func main() {
 	// Explicit product requirement (2026-08-06): "no access to controls at
 	// all" for 10s -> full restart, not a soft re-probe. A soft nudge
 	// (dataFailCh into the existing pool/router) was tried first and wasn't
-	// enough to self-heal the 2026-08-06 incident, so this exits hard via
-	// os.Exit(exitCodeStallRestart), which Kotlin catches as a signal for a
-	// clean, silent process restart.
+	// enough to self-heal the 2026-08-06 incident, so this now takes the
+	// hard path: os.Exit(exitCodeStallRestart), which Kotlin catches as a
+	// signal for a clean, silent process restart.
 	const watchdogStale = 10 * time.Second
 	// kotlinHeartbeatStale is how long the "heartbeat" IPC command (sent every
 	// 60s by SNCVpnService's netHeartbeat thread) can go missing before this is
@@ -1991,7 +2169,6 @@ func main() {
 					}
 					kotlinHeartbeatWasStale = stale
 				}
-
 				// 2026-08-06 incident #2: pool.LastDataTime() only sees dialers
 				// currently in pool.slots. A dialer already handling a live relayed
 				// TCP session (e.g. a WhatsApp call) keeps posting real traffic even
@@ -2025,7 +2202,13 @@ func main() {
 
 	// Traffic activity writer: every 1 s write the unix timestamp of the last data
 	// transfer to snc.traffic so Kotlin's state watcher can animate the icon.
+	// Also writes cumulative "<sent> <recv>" application-payload byte counts
+	// (core.TotalBytes) to snc.bytes so ConnectionFragment can show a live
+	// uplink/downlink counter -- reuses this same 1s ticker/file-poll channel
+	// rather than adding a second one, matching the traffic-timestamp pattern
+	// above.
 	trafficPath := filepath.Join(dataDir, "snc.traffic")
+	bytesPath := filepath.Join(dataDir, "snc.bytes")
 	go func() {
 		ticker := time.NewTicker(time.Second)
 		defer ticker.Stop()
@@ -2039,13 +2222,21 @@ func main() {
 					ts := strconv.FormatInt(last.Unix(), 10)
 					_ = os.WriteFile(trafficPath, []byte(ts), 0o644)
 				}
+				sent, recv := snc.TotalBytes()
+				_ = os.WriteFile(bytesPath, []byte(fmt.Sprintf("%d %d", sent, recv)), 0o644)
 			}
 		}
 	}()
 
 	// Wire TUN Ã¢â€ â€™ gVisor Ã¢â€ â€™ SOCKS5.
 	if !isProxyOnly {
-		if err := androidcore.StartTUN(tunFD, socksLn.Addr().String(), pool, bypass, dotProxyAddr, blockQUIC, disableIPv6); err != nil {
+		// In WildCat mode bypass is disabled: all traffic must flow through the
+		// whitelist-filtered TURN tunnel; direct egress would bypass the whitelist.
+		tunBypass := bypass
+		if atomic.LoadInt32(&wildcatMode) != 0 {
+			tunBypass = nil
+		}
+		if err := androidcore.StartTUN(tunFD, socksLn.Addr().String(), pool, tunBypass, dotProxyAddr, blockQUIC, disableIPv6); err != nil {
 			snc.Log.Printf("snc-core: TUN start: %v", err)
 			os.Exit(1)
 		}
@@ -2058,6 +2249,7 @@ func main() {
 		server:             srvURL,
 		reconnectCh:        reconnectCh,
 		screenCh:           screenCh,
+		wildcatModePtr:     &wildcatMode,
 		socks5:             socks5,
 		dataDir:            dataDir,
 		connStatsCollector: connStatsCollector,
@@ -2071,7 +2263,8 @@ func main() {
 	// Log upload: ship recent logs straight to the arbiter (navlink.net)
 	// over the live tunnel every 5 minutes -- see android-core/log_upload.go
 	// for why (removed the control/exit relay hop, which saw plaintext
-	// content). Same pickDialer closure as the BananaMeter prober above.
+	// content). Same pickDialer/wildcatActive closures as the BananaMeter
+	// prober above.
 	androidcore.NewLogUploader(nodeID).Start(
 		func() *snc.TunnelDialer {
 			if pool == nil {
@@ -2079,7 +2272,9 @@ func main() {
 			}
 			return pool.Pick()
 		},
-		func() bool { return false },
+		func() bool {
+			return atomic.LoadInt32(&wildcatMode) != 0
+		},
 	)
 
 	// Connection-stats upload: same channel/cadence as log upload above,
@@ -2095,7 +2290,9 @@ func main() {
 			}
 			return pool.Pick()
 		},
-		func() bool { return false },
+		func() bool {
+			return atomic.LoadInt32(&wildcatMode) != 0
+		},
 	)
 
 	// Write snc.cidr_status, snc.manifest_status, and snc.club_status every
@@ -2153,6 +2350,7 @@ type runState struct {
 	server             string
 	reconnectCh        chan struct{} // send to trigger an immediate pool refresh (capacity 1)
 	screenCh           chan bool     // send true=screen-off, false=screen-on (capacity 1)
+	wildcatModePtr     *int32        // atomic; 1 = WildCat mode, toggled by "wildcat" IPC command
 	socks5             *snc.SOCKS5Server
 	dataDir            string
 	connStatsCollector *snc.ConnStatsCollector
@@ -2385,8 +2583,8 @@ func handleConn(conn net.Conn, st *runState) {
 		// Sent by Kotlin's stopVpn() right before it kills this process
 		// (best-effort, may race the kill -- see stopVpn's comment in
 		// SNCVpnService.kt). manual=true for a genuine user/explicit
-		// disconnect; false for teardown-before-reconnect, where a new
-		// "connect" follows immediately.
+		// disconnect; false for teardown-before-reconnect (e.g. WildCat
+		// toggle), where a new "connect" follows immediately.
 		var dargs struct {
 			Manual bool `json:"manual"`
 		}
@@ -2436,6 +2634,28 @@ func handleConn(conn net.Conn, st *runState) {
 		select {
 		case st.screenCh <- false:
 		default:
+		}
+		androidcore.WriteJSON(conn, androidcore.Response{OK: true}) //nolint:errcheck
+	case "wildcat":
+		// Toggle WildCat mode without restarting the VPN.
+		// args: {"enabled": true|false}
+		var args struct {
+			Enabled bool `json:"enabled"`
+		}
+		if len(cmd.Args) > 0 {
+			json.Unmarshal(cmd.Args, &args) //nolint:errcheck
+		}
+		if st.wildcatModePtr != nil {
+			if args.Enabled {
+				atomic.StoreInt32(st.wildcatModePtr, 1)
+			} else {
+				atomic.StoreInt32(st.wildcatModePtr, 0)
+			}
+			snc.Log.Printf("snc-core: wildcat mode set to %v â€” triggering pool rebuild", args.Enabled)
+			select {
+			case st.reconnectCh <- struct{}{}:
+			default:
+			}
 		}
 		androidcore.WriteJSON(conn, androidcore.Response{OK: true}) //nolint:errcheck
 	case "trim":
@@ -2488,6 +2708,12 @@ func handleConn(conn net.Conn, st *runState) {
 		androidcore.WriteJSON(conn, androidcore.Response{OK: true}) //nolint:errcheck
 		conn.Close()
 		androidcore.StopTUN()
+		// Defense in depth: the normal path closes the WildCat session out via
+		// the "disconnect" case above (Kotlin's stopVpn sends both, disconnect
+		// first) -- but if "stop" ever arrives without a preceding
+		// "disconnect" (or that IPC send raced the kill), this keeps the
+		// session from going unreported. Idempotent/safe no-op if already
+		// closed (EndWildcatSession no-ops when no session is active).
 		os.Exit(0)
 	default:
 		androidcore.WriteJSON(conn, androidcore.Response{Error: "unknown command: " + cmd.Cmd}) //nolint:errcheck
@@ -2520,6 +2746,16 @@ func saveCountry(dir, cc string) {
 // Used for non-retriable exits (key_error) where immediate detection matters.
 func writeState(dir, state string) {
 	_ = os.WriteFile(filepath.Join(dir, "snc.state"), []byte(state), 0o600)
+}
+
+// writeMigratedKey writes a freshly-migrated (legacy V1 -> V2) key string to
+// snc.migrated_key so Kotlin's state-watch (SNCVpnService.kt) can pick it up
+// and persist it over the old one in SharedPreferences -- otherwise every
+// future launch would silently re-migrate (an extra navlink.net round trip
+// every single time) instead of starting on V2 directly like every other
+// platform does once migrated.
+func writeMigratedKey(dir, keyStr string) {
+	_ = os.WriteFile(filepath.Join(dir, "snc.migrated_key"), []byte(keyStr), 0o600)
 }
 
 func loadCountry(dir string) string {

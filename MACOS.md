@@ -2,7 +2,7 @@
 
 ShortNerdCat macOS client is a system-tray VPN app for macOS 12+. It is
 functionally equivalent to the Windows client: same tunnel architecture, same
-transport modes (normal TCP, VLESS), same discovery and relay subsystems.
+transport modes (normal TCP, VLESS, WildCat), same discovery and relay subsystems.
 
 ---
 
@@ -25,6 +25,8 @@ shortnerdcat/
       notification_darwin.go ← osascript notifications
       key_darwin.go        ← activation key persistence (0600 file)
       firewall_darwin.go   ← pf anchor DNS-leak prevention
+      wildcatauth_cgo_darwin.go ← cgo bridge for the WildCat login WebView (not part of this public mirror)
+      wildcatauth_cocoa.m       ← WildCat login WKWebView implementation (not part of this public mirror)
     cmd/shortnerdcat/
       main_darwin.go       ← app entry point, all tunnel logic
       watchdog_darwin.go   ← watchdog mode implementation
@@ -51,11 +53,12 @@ TUNBridge (utun0)          tun_darwin.go
   ▼
 SOCKS5Server  127.0.0.1:random
   │
-  └── DialerPool → TunnelDialer → control:443 → exit → target
+  ├── normal mode:  DialerPool → TunnelDialer → control:443 → exit → target
+  └── WildCat mode: covert relay pool → the third-party relay → control → exit → target
 ```
 
 DNS always resolves via 1.1.1.1 which is routed through the TUN (DoH / DNS-in-tunnel).
-Control IPs have bypass host routes via the original gateway.
+Control and WildCat backend IPs have bypass host routes via the original gateway.
 
 ---
 
@@ -91,15 +94,15 @@ Installs split-tunnel routes using `/sbin/route` and `netstat`.
 **Route set installed:**
 ```
 /sbin/route add -host <server_ip> <origGW>    # bypass for control IPs (from Prepare)
-/sbin/route add -host 1.1.1.1  <origGW>       # DNS bypass (skipped in DoH mode)
+/sbin/route add -host 1.1.1.1  <origGW>       # DNS bypass (skipped in DoH/WildCat mode)
 /sbin/route add -net 0/1       <tunGW>         # split-tunnel: lower half
 /sbin/route add -net 128/1     <tunGW>         # split-tunnel: upper half
-/sbin/route add -inet6 ::/1    <tunIPv6Addr>   # IPv6
-/sbin/route add -inet6 8000::/1 <tunIPv6Addr>  # IPv6
+/sbin/route add -inet6 ::/1    <tunIPv6Addr>   # IPv6 (skipped in WildCat mode)
+/sbin/route add -inet6 8000::/1 <tunIPv6Addr>  # IPv6 (skipped in WildCat mode)
 ```
 
 **`AddBypass(ip)`** — adds a host route for `ip` via `origGW` after Apply; used for
-additional control IPs discovered post-connect.
+additional control IPs and WildCat backend IPs discovered post-connect.
 
 **Exported getters:** `OrigGW()`, `PhysIface()`, `LocalAddr()`.
 
@@ -124,14 +127,16 @@ an unclean exit (no live `RouteManager` available).
 Full feature parity with the Windows tray. Key behaviours:
 
 - **Icons**: idle / connecting / connected / error — PNG loaded from embedded assets.
-- **`connectedIcon()`**: picks VLESS icon > standard connected icon.
+- **`connectedIcon()`**: picks WildCat icon > VLESS icon > standard connected icon.
 - **`doConnect(autoReconnect)`**: 90 s deadline, panic recovery via `runtime/debug`,
   starts `tickElapsed` (tooltip `Connected HH:MM:SS`) and `runWatchdog`.
-- **`runWatchdog`**: polls `core.TunnelMonitor.IsStuck()` every 2 s, fires reconnect.
+- **`runWatchdog`**: polls `core.TunnelMonitor.IsStuck()` every 2 s, fires reconnect;
+  skipped in WildCat mode (mux handles its own health).
 - **`scheduleRetry`**: exponential back-off 30 s → 5 min.
 - **`showAbout(version)`**: `osascript display dialog` (no splash window on macOS).
 - **Auth warning / login error** states with icon changes.
 - **Regions**: submenu with radio-button checkboxes.
+- **Transport toggles**: VLESS-only and WildCat-only are mutually exclusive.
 - **DoH toggle**: saves to settings; takes effect on next connect (route-level, not runtime).
 - **Quit**: blinks connecting↔idle, waits up to 30 s for disconnect, calls
   `snmac.SignalCleanShutdown()`.
@@ -203,7 +208,7 @@ Idempotent: `Apply` is a no-op if already applied; `Remove` is a no-op if not ap
 `~/.shortnerdcat/` (via `APPDATA` env var set in `init()`).
 
 Stored files: `key.dat`, `device_id`, `node_id`, `settings.json`, `peers.json`,
-`relays.json`, `cidr.json`, `notif_seen.json`, `country.txt`,
+`relays.json`, `cidr.json`, `notif_seen.json`, `country.txt`, `wildcat-relay-creds.json`,
 `watchdog.json`.
 
 Logs: `~/.shortnerdcat/logs/`.
@@ -223,6 +228,41 @@ Logs: `~/.shortnerdcat/logs/`.
 
 Not present on the current macOS client (no `sing-box`/VLESS references anywhere in
 `main_darwin.go` or `tray_darwin.go`) — matches Windows, which also has no VLESS mode.
+
+### WildCat
+
+Covert transport over an unrelated third party's video-call TURN relays (package not part of
+this public mirror — see [[ARCHITECTURE.md]] §2.8). No build-time secrets; credentials are
+fetched at runtime by having the device create its own private video conference with that
+service.
+
+- Toggled via the tray's `IsWildcatEnabled()`/`SetWildcatEnabled()`/`SetWildcatCallback(func(bool,
+  wildcatToken string))` API (`tray_darwin.go`).
+- Login: `snc_wildcat_login_open`/`snc_wildcat_refresh_token` (cgo bridge in `wildcatauth_cgo_darwin.go`,
+  WKWebView implementation in `wildcatauth_cocoa.m` — neither published) opens a login panel,
+  extracts the access token, and hands it to the credential manager as the runtime `accessToken`
+  callback.
+- The relay pool is created at connect start (before re-auth) so the re-auth HTTP request also
+  travels through the relay when direct TCP is blocked; existing `initialPoolDialers`
+  have their transport swapped in-place via `td.SetDialFunc(pool.Dial)` /
+  `td.Auth().SetDialFunc(pool.Dial)` rather than building a separate pool.
+- Relay IPs and credential-domain IPs are resolved and added as bypass host routes before
+  `routes.Apply()` (physical NIC still primary) so that traffic never loops back through the
+  tunnel.
+- `pool.Warm()` pre-establishes the session so the first browser connection doesn't block on
+  setup; `ipc.PushWildcatStatus(true/false)` reports success/failure back to the tray so it can
+  un-check the toggle on a failed connect attempt.
+- Pool + credential-refresh context torn down on disconnect (cancel → `pool.Close()`), same
+  order as Windows.
+- IPv6 split routes disabled (mux is IPv4 only).
+- DNS bypass disabled (DNS routes through TUN as DoH).
+- Bypass manager country detection still runs but `ShouldBypass` returns false
+  (`bypassMgr.SetEnabled(false)`).
+- Decoy manager runs in WildCat mode (`NewDecoyManagerWildcat`) — Russian targets
+  at higher rate to match ordinary Russian browsing profile.
+- Pool refill goroutine skips all probing (`continue` on every tick).
+- Data-plane watchdog goroutine not started (traffic bypasses dialer pool).
+- Silent refresh: re-auth primary dialer via mux (no control probing).
 
 ---
 
@@ -247,7 +287,7 @@ These start at connect and stop at disconnect regardless of transport mode.
 
 Initialized once at startup from `node_id`. Bootstrapped with relay addresses
 fetched at each connect. Every 5 min the DHT relay registry is merged into the
-router and paths are rebuilt.
+router and paths are rebuilt (skipped in WildCat mode).
 
 ### Relay clients
 
@@ -259,7 +299,7 @@ After routes are up, a background goroutine tries:
 
 ## 8. DoH
 
-When DoH is enabled (default):
+When DoH is enabled (default) or in WildCat mode:
 - `routes.DisableDNSBypass()` prevents the 1.1.1.1 host route from being installed.
 - System DNS is set to 1.1.1.1 by `DNSManager`.
 - Queries to 1.1.1.1 flow through the TUN → SOCKS5 → exit node → Cloudflare HTTPS.
@@ -284,7 +324,7 @@ ShortNerdCat.app/
     Resources/
       AppIcon.icns
       snc_idle.png / snc_connected.png / snc_connecting.png / snc_error.png
-      snc_vless.png
+      snc_wildcat.png / snc_vless.png
 ```
 
 `CFBundleIdentifier`: `net.navlink.shortnerdcat`  
@@ -304,8 +344,7 @@ lipo -create amd64_bin arm64_bin -output ShortNerdCat
 **Must build on macOS** — CGo is required for `power_darwin.go` (IOKit) and
 indirectly for tun2socks/gvisor.
 
-Apple Developer cert: `Developer ID Application: <Your Name> (<TEAMID>)` — set via the
-`CERT_ID` / `APPLE_TEAM_ID` env vars, see `build.sh`.
+Apple Developer cert: `Developer ID Application: Konstantin Khait (AF6BSD27T9)`.  
 Notarization keychain profile: `notarization-profile`.
 
 ---

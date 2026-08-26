@@ -19,13 +19,14 @@ type IPCMsg struct {
 	T string `json:"t"`
 
 	// "init" — sent once after socket connect
-	Version     string `json:"version,omitempty"`
-	InitLogin   bool   `json:"init_login,omitempty"`
-	AutoConnect bool   `json:"auto_connect,omitempty"`
-	DOH         bool   `json:"doh,omitempty"`
-	BlockQUIC   bool   `json:"block_quic,omitempty"`
-	Region      string `json:"region,omitempty"`
-	LogDir      string `json:"log_dir,omitempty"`
+	Version        string `json:"version,omitempty"`
+	InitLogin      bool   `json:"init_login,omitempty"`
+	AutoConnect    bool   `json:"auto_connect,omitempty"`
+	DOH            bool   `json:"doh,omitempty"`
+	BlockQUIC      bool   `json:"block_quic,omitempty"`
+	Region         string `json:"region,omitempty"`
+	LogDir         string `json:"log_dir,omitempty"`
+	WildcatEnabled bool   `json:"wildcat_enabled,omitempty"` // current WildCat state (persisted in daemon)
 
 	// "status" — state machine update
 	// State: "idle" | "pending" | "connected" | "error" | "login_error"
@@ -39,6 +40,10 @@ type IPCMsg struct {
 	Msgs []string `json:"msgs,omitempty"`
 
 	// "ask_key" — main wants a subscription key from the user
+
+	// "wildcat_status" — daemon reports WildCat connect result to tray
+	// (so tray can uncheck the menu item on failure)
+	WildcatOK bool `json:"wildcat_ok,omitempty"`
 
 	// "club_theme" — daemon reports the current club membership theme, once
 	// ClubDiscoverer confirms it (see tunnel_cat/docs/club-membership.md).
@@ -61,6 +66,17 @@ type IPCMsg struct {
 	// gates the tray's "Recommend new Cat Club members" menu item. True iff
 	// the account currently has direct or subsumed Cat Club access.
 	CanRecommend bool `json:"can_recommend,omitempty"`
+
+	// "bytes" — live cumulative uplink/downlink byte counters, pushed once a
+	// second while connected (see core.TotalBytes's doc comment). The daemon
+	// is the only process that runs the tunnel dialer/SOCKS5/router on macOS
+	// (the tray is a separate, unprivileged OS process, see runTrayProcess in
+	// cmd/shortnerdcat/tray_main_darwin.go), so these counters must cross the
+	// IPC boundary the same way every other live stat here does -- there is
+	// no way for the tray to read core.TotalBytes() itself and get anything
+	// but a permanently-zero, never-updated counter.
+	BytesSent int64 `json:"bytes_sent,omitempty"`
+	BytesRecv int64 `json:"bytes_recv,omitempty"`
 }
 
 // IPCCmd is sent from the tray (user) process to the main (root/VPN) process.
@@ -73,6 +89,10 @@ type IPCCmd struct {
 	DOH           bool   `json:"doh,omitempty"`
 	Region        string `json:"region,omitempty"`
 	AutoReconnect bool   `json:"auto_reconnect,omitempty"`
+	// "wildcat" — tray toggles WildCat mode; WildcatToken is non-empty when enabling
+	WildcatEnabled bool   `json:"wildcat_enabled,omitempty"`
+	WildcatToken   string `json:"wildcat_token,omitempty"`
+	// "wildcat_token" — tray pushes a refreshed WildCat access token
 
 	// "recommend" — tray forwards a Cat Club recommendation submitted in the
 	// Settings panel; the daemon holds the session token needed to actually

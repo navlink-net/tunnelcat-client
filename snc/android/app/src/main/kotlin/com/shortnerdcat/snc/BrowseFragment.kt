@@ -23,8 +23,11 @@ import android.webkit.PermissionRequest
 import android.webkit.SslErrorHandler
 import android.webkit.URLUtil
 import android.webkit.WebChromeClient
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
+import android.webkit.WebStorage
 import android.webkit.WebViewClient
 import android.widget.EditText
 import android.widget.FrameLayout
@@ -52,6 +55,20 @@ class BrowseFragment : Fragment() {
 
     private val tabs = mutableListOf(BrowseTab())
     private var currentTab = 0
+
+    // When non-null, the Browse tab is in login mode for WildCat credential
+    // acquisition; cleared automatically when login is detected or abandoned.
+    @Volatile private var loginCallback: ((String?) -> Unit)? = null
+
+    // User-agent saved before the login flow; restored when it finishes.
+    private var savedUserAgent: String? = null
+
+    private var mobileRedirectDone = false
+
+    private var wildcatExtractAttempts = 0
+
+    // WildCat mode flag.
+    private var wildcatMode = false
 
     // Periodic WebView cleanup to prevent V8 heap and BFCache accumulation over
     // long sessions (8 h+ causes main-thread GC pauses long enough for ANR).
@@ -137,8 +154,37 @@ class BrowseFragment : Fragment() {
         webView = wv
         setupWebView()
         loadPersistedTabs()
+        updateWildcatMode()
         navigateTo(tabs[currentTab].url)
     }
+
+    // Returns true if a login flow is already in progress (waiting for login completion).
+    fun isWildcatLoginActive(): Boolean = loginCallback != null
+
+    // Starts WildCat credential acquisition via the Browse tab. The caller restores
+    // the previous URL via returnToUrl() and switches back to the Connect tab.
+    fun startWildcatLogin(onDone: (String?) -> Unit) {
+        onDone(null)
+    }
+
+    // Complete the login flow: restore the original User-Agent, clear the login
+    // callback, and deliver the result. Idempotent — safe to call regardless of
+    // success or failure.
+    private fun finishWildcatLogin(cb: (String?) -> Unit, token: String?) {
+        loginCallback = null
+        savedUserAgent?.let { webView?.settings?.userAgentString = it }
+        savedUserAgent = null
+        cb(token)
+    }
+
+    // Returns the URL of the currently active tab. Used by callers that need to
+    // save and restore the Browse position around the login flow.
+    fun getCurrentTabUrl(): String = tabs.getOrNull(currentTab)?.url ?: HOME_URL
+
+    // Navigate Browse tab to url after a login flow completes. Public wrapper
+    // around the private navigateTo so callers (e.g. MainActivity) can restore
+    // the previous page without needing fragment-internal access.
+    fun returnToUrl(url: String) { navigateTo(url) }
 
     // Called by MainActivity when VPN disconnects.
     fun onVpnDisconnected() {
@@ -149,10 +195,11 @@ class BrowseFragment : Fragment() {
     // Called by MainActivity when VPN connects.
     fun onVpnConnected() {
         Log.d(TAG, "onVpnConnected")
-        // Do not trigger a page load here. Loading from a VPN state callback
-        // fires during ViewPager layout transitions and can permanently freeze
-        // UI input events. The user navigates to the Browse tab and loads
-        // pages themselves.
+        updateWildcatMode()
+        // Do not trigger a page load here (WildCat or otherwise). Loading from a
+        // VPN state callback fires during ViewPager layout transitions and can
+        // permanently freeze UI input events. The user navigates to the Browse
+        // tab and loads pages themselves.
     }
 
     private fun reloadCurrentTab() {
@@ -162,19 +209,30 @@ class BrowseFragment : Fragment() {
 
     private fun setupWebView() {
         val wv = webView ?: return
-        // Logged once per WebView creation -- cheap and the single most direct
-        // way to confirm or rule out "outdated WebView / stale root store" as
-        // the cause of a TLS trust failure (old, infrequently-updated devices
-        // often run a WebView build whose bundled root store predates a
-        // legitimate, currently-valid CA -- same symptom as a real MITM, but
-        // nothing to do with the network).
+        // Logged once per WebView creation, not gated on loginCallback -- this
+        // is cheap and the single most direct way to confirm or rule out "outdated
+        // WebView / stale root store" as the cause of a TLS trust failure (2026-08-15
+        // WildCat login investigation: old, infrequently-updated devices often run
+        // a WebView build whose bundled root store predates a legitimate, currently-
+        // valid CA -- same symptom as a real MITM, but nothing to do with the network).
         try {
             val pkg = android.webkit.WebView.getCurrentWebViewPackage()
-            KotlinLog.log("BrowseFragment: WebView package=${pkg?.packageName} versionName=${pkg?.versionName} " +
-                "androidSdk=${android.os.Build.VERSION.SDK_INT} androidRelease=${android.os.Build.VERSION.RELEASE} " +
-                "device=${android.os.Build.MANUFACTURER}/${android.os.Build.MODEL}")
+            LogEvent.emitSystem(
+                LogEvents.BrowseWebviewInfo,
+                LogAttrs.ATTR_Ok to true,
+                LogAttrs.ATTR_Pkg to (pkg?.packageName ?: ""),
+                LogAttrs.ATTR_VersionName to (pkg?.versionName ?: ""),
+                LogAttrs.ATTR_AndroidSdk to android.os.Build.VERSION.SDK_INT.toLong(),
+                LogAttrs.ATTR_AndroidRelease to android.os.Build.VERSION.RELEASE,
+                LogAttrs.ATTR_Device to "${android.os.Build.MANUFACTURER}/${android.os.Build.MODEL}",
+            )
         } catch (e: Exception) {
-            KotlinLog.log("BrowseFragment: WebView package info unavailable: $e androidSdk=${android.os.Build.VERSION.SDK_INT}")
+            LogEvent.emitSystem(
+                LogEvents.BrowseWebviewInfo,
+                LogAttrs.ATTR_Ok to false,
+                LogAttrs.ATTR_AndroidSdk to android.os.Build.VERSION.SDK_INT.toLong(),
+                LogAttrs.ATTR_Err to e.toString(),
+            )
         }
         wv.settings.apply {
             javaScriptEnabled = true
@@ -186,22 +244,46 @@ class BrowseFragment : Fragment() {
         CookieManager.getInstance().setAcceptThirdPartyCookies(wv, true)
 
         wv.webChromeClient = object : WebChromeClient() {
-            // No legitimate getUserMedia() use case in this in-app browser.
+            // This WebView only ever loads the WildCat login provider for a login token
+            // acquisition (see startWildcatLogin) -- never a general browsing
+            // surface, so there's no legitimate getUserMedia() use case here.
             // Deny explicitly rather than leaving the request unanswered
             // (the base WebChromeClient.onPermissionRequest is a no-op, which
             // leaves the page's getUserMedia() promise hanging forever).
             override fun onPermissionRequest(request: PermissionRequest) {
                 Log.w(TAG, "onPermissionRequest: origin=${request.origin} resources=${request.resources.joinToString()}")
-                KotlinLog.log("BrowseFragment: onPermissionRequest origin=${request.origin} resources=${request.resources.joinToString()} -> denied")
+                LogEvent.emitSystem(
+                    LogEvents.BrowsePermissionDenied,
+                    LogAttrs.ATTR_Origin to request.origin.toString(),
+                    LogAttrs.ATTR_Resources to request.resources.joinToString(),
+                )
                 request.deny()
             }
 
             override fun onProgressChanged(view: WebView, newProgress: Int) {
                 progressBar?.progress = newProgress
                 progressBar?.visibility = if (newProgress < 100) View.VISIBLE else View.GONE
+                if (loginCallback != null) {
+                    LogEvent.emitSystem(
+                        LogEvents.WildcatLoginProgress,
+                        LogAttrs.ATTR_Url to (view.url ?: ""),
+                        LogAttrs.ATTR_Progress to newProgress.toLong(),
+                    )
+                }
             }
 
             override fun onReceivedTitle(view: WebView, title: String?) {
+                // Was silent before for the ignored cases -- during the 2026-08-15 WildCat
+                // login investigation the *raw* title (blank vs data: vs real) at every
+                // callback turned out to matter, not just the one value finally kept.
+                if (loginCallback != null) {
+                    LogEvent.emitSystem(
+                        LogEvents.WildcatLoginNote,
+                        LogAttrs.ATTR_Url to (view.url ?: ""),
+                        LogAttrs.ATTR_Kind to "title",
+                        LogAttrs.ATTR_Text to (title?.take(120) ?: ""),
+                    )
+                }
                 // Ignore titles from the connecting page (data: URL) and blank placeholders.
                 if (!title.isNullOrEmpty() && !title.startsWith("data:")) {
                     tabs[currentTab] = tabs[currentTab].copy(title = title)
@@ -212,9 +294,19 @@ class BrowseFragment : Fragment() {
             // violations blocking a resource, mixed-content refusals) are otherwise
             // completely invisible: a page can fire onPageFinished successfully while
             // never actually rendering real content because its own JS threw partway
-            // through.
+            // through. See 2026-08-15 WildCat login investigation -- the client
+            // reports the login page opens fine in a normal browser, so a WebView-specific JS/CSP
+            // failure is a live suspect and this is the only way to see one.
             override fun onConsoleMessage(msg: android.webkit.ConsoleMessage): Boolean {
-                Log.d(TAG, "console[${msg.messageLevel()}] ${msg.message()} (${msg.sourceId()}:${msg.lineNumber()})")
+                if (loginCallback != null) {
+                    Log.d(TAG, "console[${msg.messageLevel()}] ${msg.message()} (${msg.sourceId()}:${msg.lineNumber()})")
+                    LogEvent.emitSystem(
+                        LogEvents.WildcatLoginNote,
+                        LogAttrs.ATTR_Url to msg.sourceId(),
+                        LogAttrs.ATTR_Kind to "console",
+                        LogAttrs.ATTR_Text to "[${msg.messageLevel()}] ${msg.message()} (line ${msg.lineNumber()})",
+                    )
+                }
                 return false
             }
         }
@@ -232,61 +324,120 @@ class BrowseFragment : Fragment() {
             }
             val dm = requireContext().getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
             dm.enqueue(request)
-            Toast.makeText(requireContext(), "Downloading $fileName", Toast.LENGTH_SHORT).show()
+            Toast.makeText(requireContext(), getString(R.string.downloading_file, fileName), Toast.LENGTH_SHORT).show()
         }
 
         wv.webViewClient = object : WebViewClient() {
             private var autoRetryPending = false
 
+            // In WildCat mode all link navigations go through navigateTo (SOCKS5/TUN).
+            // Fall back to direct load if VPN is not running.
+            override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
+                val url = request.url
+                // Diagnostic only: WebView cannot natively hand off non-http(s) schemes
+                // (custom schemes, intent:// URIs) to installed apps the way Chrome does —
+                // it silently no-ops or errors instead. Logging every such attempt here so
+                // we can see exactly what URL the "log in via app" button tries to load,
+                // before writing the actual Intent-launch handoff.
+                if (url.scheme != "http" && url.scheme != "https") {
+                    Log.i(TAG, "shouldOverrideUrlLoading: non-http(s) scheme=${url.scheme} url=$url")
+                    LogEvent.emitSystem(
+                        LogEvents.BrowseNonHttpScheme,
+                        LogAttrs.ATTR_Scheme to (url.scheme ?: ""),
+                        LogAttrs.ATTR_Url to url.toString(),
+                    )
+                }
+                if (!wildcatMode || !SNCVpnService.isRunning) return false
+                Log.d(TAG, "shouldOverrideUrlLoading wc: $url")
+                view.post { navigateTo(url.toString()) }
+                return true
+            }
+
             override fun onReceivedError(view: WebView, request: android.webkit.WebResourceRequest, error: android.webkit.WebResourceError) {
                 if (!request.isForMainFrame) return
                 val url = request.url?.toString() ?: ""
                 Log.w(TAG, "main frame error ${error.errorCode}: ${error.description} url=$url")
-                KotlinLog.log("BrowseFragment: onReceivedError code=${error.errorCode} desc=${error.description} url=$url")
+                // Was Logcat-only before -- invisible in the uploaded diagnostic log, which
+                // made a real login-page load failure indistinguishable from "page loaded but
+                // empty" when reading snc-logs.zip after the fact. See 2026-08-15 WildCat
+                // login investigation.
+                LogEvent.emitSystem(
+                    LogEvents.BrowseLoadError,
+                    LogAttrs.ATTR_Code to error.errorCode.toLong(),
+                    LogAttrs.ATTR_Desc to error.description.toString(),
+                    LogAttrs.ATTR_Url to url,
+                    LogAttrs.ATTR_WildcatMode to wildcatMode,
+                )
                 view.post { showErrorPage(view, url) }
                 if (SNCVpnService.isTunnelReady && !autoRetryPending) {
                     autoRetryPending = true
                     view.postDelayed({
                         autoRetryPending = false
                         val target = tabs.getOrNull(currentTab)?.url ?: HOME_URL
-                        view.loadUrl(target)
+                        // In WildCat mode, navigateTo handles the full fetch cycle.
+                        if (wildcatMode) navigateTo(target) else view.loadUrl(target)
                     }, 2000)
                 }
             }
 
-            // TLS-level failures (bad/interfering cert, e.g. DPI/MITM tampering)
-            // are otherwise invisible: the default WebViewClient behavior
-            // (cancel the load) still applies here, this only adds visibility
-            // into *why* a load silently stopped.
+            // No override existed before -- TLS-level failures (bad/interfering cert,
+            // e.g. DPI/MITM tampering) were invisible everywhere, not just in the
+            // uploaded log: the default WebViewClient behavior (cancel the load) still
+            // applies here, this only adds visibility into *why* a load silently
+            // stopped. See 2026-08-15 WildCat login investigation.
             override fun onReceivedSslError(view: WebView, handler: SslErrorHandler, error: SslError) {
                 Log.w(TAG, "SSL error ${error.primaryError}: url=${error.url}")
                 // Log the actual cert chain, not just the error code -- primaryError alone
                 // (e.g. 3 = SSL_UNTRUSTED) doesn't say WHOSE cert was rejected. Whether
                 // issuedBy is a real public CA (Let's Encrypt, DigiCert, ...) vs something
-                // unrecognizable (a MITM/interception CA, a self-signed cert) settles
-                // whether this is a trust-policy gap or real interception without needing
-                // to ask the user to check their device's CA store by hand.
+                // unrecognizable (a MITM/interception CA, a self-signed cert) settles the
+                // 2026-08-15 "is this a trust-policy gap or real interception" question
+                // without needing to ask the user to check their device's CA store by hand.
                 val cert = error.certificate
-                KotlinLog.log("BrowseFragment: onReceivedSslError primaryError=${error.primaryError} url=${error.url} " +
-                    "issuedTo='${cert.issuedTo?.dName}' issuedBy='${cert.issuedBy?.dName}' validFrom=${cert.validNotBeforeDate} validTo=${cert.validNotAfterDate}")
+                LogEvent.emitSystem(
+                    LogEvents.BrowseSslError,
+                    LogAttrs.ATTR_PrimaryError to error.primaryError.toLong(),
+                    LogAttrs.ATTR_Url to error.url,
+                    LogAttrs.ATTR_WildcatMode to wildcatMode,
+                    LogAttrs.ATTR_IssuedTo to (cert.issuedTo?.dName ?: ""),
+                    LogAttrs.ATTR_IssuedBy to (cert.issuedBy?.dName ?: ""),
+                    LogAttrs.ATTR_ValidFrom to cert.validNotBeforeDate.toString(),
+                    LogAttrs.ATTR_ValidTo to cert.validNotAfterDate.toString(),
+                )
                 handler.cancel()
             }
 
+            override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
+                // Was the Yandex browse-proxy resource-cache hook (wcResourceCache),
+                // removed 2026-08-15 along with that whole mechanism. WildCat mode
+                // now routes everything through SOCKS5/TUN like a normal load, so
+                // there's nothing to intercept here.
+                return null
+            }
+
             override fun onPageStarted(view: WebView, url: String?, favicon: Bitmap?) {
-                // Suppressing WebView callbacks prevents stale/cancelled page loads from
+                if (loginCallback != null) {
+                    LogEvent.emitSystem(
+                        LogEvents.WildcatLoginNote,
+                        LogAttrs.ATTR_Url to (url ?: ""),
+                        LogAttrs.ATTR_Kind to "page_started",
+                        LogAttrs.ATTR_Text to "",
+                    )
+                }
+                // Pre-existing behavior, unchanged by the 2026-08-15 Yandex-ZIP removal:
+                // WildCat mode suppresses these WebView-driven URL bar updates. Suppressing
+                // WebView callbacks prevents stale/cancelled page loads from
                 // overwriting the URL bar mid-navigation (e.g. interrupted navlink.net load
                 // firing onPageFinished after the user has already typed a new address).
-                val skip = url == null || url.startsWith("data:") || url == "about:blank"
-                if (!skip) {
-                    urlBar?.setText(url)
-                    pageSpinner?.visibility = View.VISIBLE
-                }
+                val skip = url == null || url.startsWith("data:") || url == "about:blank" || wildcatMode
+                if (!skip) urlBar?.setText(url)
+                if (!wildcatMode && !skip) pageSpinner?.visibility = View.VISIBLE
                 updateNavButtons()
             }
 
             override fun onPageFinished(view: WebView, url: String?) {
                 pageSpinner?.visibility = View.GONE
-                val skip = url == null || url.startsWith("data:") || url == "about:blank"
+                val skip = url == null || url.startsWith("data:") || url == "about:blank" || wildcatMode
                 if (!skip) {
                     urlBar?.setText(url)
                     updateCurrentTabUrl(url)
@@ -297,11 +448,25 @@ class BrowseFragment : Fragment() {
         }
     }
 
-    // navigateTo is the single entry point for all page loads.
+    // navigateTo is the single entry point for all page loads. Always a direct
+    // WebView load: in WildCat mode traffic goes through SOCKS5/TUN (a covert relay
+    // backend, with certain domains dialing directly per WildcatDirectHosts
+    // -- see snc/core/socks5.go); in plain TUN mode it's just a normal load.
+    // (The Yandex-Disk-backed browse-proxy/ZIP-fetch alternative path was
+    // removed 2026-08-15 -- the WildCat relay replaced it; see the 2026-08-15 WildCat
+    // login investigation.)
     private fun navigateTo(input: String) {
         val url = normalizeUrl(input)
         urlBar?.setText(url)
-        Log.d(TAG, "navigateTo: vpnRunning=${SNCVpnService.isRunning} url=$url")
+        Log.d(TAG, "navigateTo: wildcatMode=$wildcatMode vpnRunning=${SNCVpnService.isRunning} url=$url")
+        if (loginCallback != null) {
+            LogEvent.emitSystem(
+                LogEvents.WildcatLoginNavigate,
+                LogAttrs.ATTR_WildcatMode to wildcatMode,
+                LogAttrs.ATTR_VpnRunning to SNCVpnService.isRunning,
+                LogAttrs.ATTR_Url to url,
+            )
+        }
         webView?.loadUrl(url)
     }
 
@@ -312,6 +477,12 @@ class BrowseFragment : Fragment() {
             trimmed.contains(".") -> "https://$trimmed"
             else -> "https://www.google.com/search?q=${URLEncoder.encode(trimmed, "UTF-8")}"
         }
+    }
+
+    private fun updateWildcatMode() {
+        wildcatMode = requireContext()
+            .getSharedPreferences("snc", Context.MODE_PRIVATE)
+            .getBoolean("wildcat", false)
     }
 
     private fun showTabsMenu(anchor: View) {

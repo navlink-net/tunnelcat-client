@@ -23,11 +23,15 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/anacrolix/torrent/metainfo"
 	"github.com/google/uuid"
 	"golang.org/x/sys/windows"
+	"shortnerdcat/snc/shared/keymigrate"
 	"shortnerdcat/snc/shared/navlinkauth"
 	snwin "shortnerdcat/snc/win/windows"
+	"tunnel_cat/binlog"
 	"tunnel_cat/dht"
+	"tunnel_cat/logevent"
 	"tunnel_cat/snc/core"
 )
 
@@ -82,9 +86,6 @@ func main() {
 		return
 	}
 
-	// Ã¢"â‚¬Ã¢"â‚¬ 0b. Apply pending update (before mutex so the new process is not blocked).
-	core.ApplyPendingUpdate()
-
 	// Ã¢"â‚¬Ã¢"â‚¬ 1. Logging  -  initialised early so early-exit paths are visible in logs Ã¢"â‚¬
 	if err := core.InitLogging(`C:\.shortnerdcat\logs`); err != nil {
 		fmt.Fprintf(os.Stderr, "warn: logging init: %v\n", err)
@@ -98,8 +99,28 @@ func main() {
 			os.Stderr = f
 		}
 	}
+
+	// Clean up leftover artifacts from any earlier interrupted update attempt
+	// FIRST, unconditionally, before either applying a new pending update or
+	// checking single-instance below. Previously this ran only after the
+	// single-instance check succeeded (see the 0c block) -- but the relaunch
+	// in applyClientSelfReplace starts its child and calls os.Exit(0) in the
+	// parent essentially concurrently, so the child's single-instance check
+	// can race the OS actually releasing the parent's mutex. A child that
+	// loses that race returns at the single-instance guard below and NEVER
+	// reached UpdateCleanup, permanently stranding that update's .old file --
+	// this is what let it survive 12 days in the original 2026-08-10
+	// incident, and recurred live on 2026-08-22. Running cleanup here means
+	// every process that even starts up removes stale artifacts, regardless
+	// of which one ends up winning the single-instance race.
+	core.UpdateCleanup()
+
+	// 0b. Apply pending update (before mutex so the new process is not blocked).
+	core.ApplyPendingUpdate()
 	if len(forcedControls) > 0 {
-		core.Log.Printf("DEBUG: --controls override active: %v", forcedControls)
+		logevent.Emit(binlog.TagSystem, logevent.EventWinStartupDiag,
+			logevent.Str(logevent.AttrStage, logevent.WinStartupDiagStageControlsOverride),
+			logevent.Str(logevent.AttrDetail, fmt.Sprintf("%v", forcedControls)))
 	}
 
 	// Ã¢"â‚¬Ã¢"â‚¬ 0c. Single-instance guard Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬
@@ -107,12 +128,10 @@ func main() {
 	// mutex.  We keep the handle open for the lifetime of the process so the
 	// OS releases it automatically on exit.
 	if !ensureSingleInstance() {
-		core.Log.Printf("another instance is running and could not be terminated â€” exiting")
+		logevent.Emit(binlog.TagSystem, logevent.EventWinStartupDiag,
+			logevent.Str(logevent.AttrStage, logevent.WinStartupDiagStageSingleInstanceBlocked))
 		return
 	}
-
-	// Clean up leftover artifacts from a previous update attempt.
-	core.UpdateCleanup()
 
 	// Remove any DoH config left by a session that ended without clean disconnect.
 	// Must run before auto-connect so DNS is not broken during the connect sequence.
@@ -124,20 +143,27 @@ func main() {
 	// Ã¢"â‚¬Ã¢"â‚¬ 1b. Watchdog: persist our PID and start the watchdog if not running Ã¢"â‚¬Ã¢"â‚¬
 	// Write PID so the watchdog can attach to us if it starts after we do.
 	if err := core.WriteWatchdogState(core.WatchdogState{MainPID: os.Getpid()}); err != nil {
-		core.Log.Printf("warn: write watchdog state: %v", err)
+		logevent.Emit(binlog.TagSystem, logevent.EventWinWatchdogLifecycle,
+			logevent.Str(logevent.AttrStage, logevent.WinWatchdogLifecycleStageStateWriteFailed),
+			logevent.Str(logevent.AttrErr, err.Error()))
 	}
 	// Start the watchdog process if it is not already running.  The watchdog
 	// advertises its presence via a named mutex; no-op if already up.
 	var watchdogProc *os.Process
 	if !snwin.WatchdogRunning() {
 		if wp, err := snwin.StartWatchdog(); err != nil {
-			core.Log.Printf("warn: start watchdog: %v", err)
+			logevent.Emit(binlog.TagSystem, logevent.EventWinWatchdogLifecycle,
+				logevent.Str(logevent.AttrStage, logevent.WinWatchdogLifecycleStageStartFailed),
+				logevent.Str(logevent.AttrErr, err.Error()))
 		} else {
 			watchdogProc = wp
-			core.Log.Printf("watchdog: started pid=%d", wp.Pid)
+			logevent.Emit(binlog.TagSystem, logevent.EventWinWatchdogLifecycle,
+				logevent.Str(logevent.AttrStage, logevent.WinWatchdogLifecycleStageStarted),
+				logevent.Int(logevent.AttrPid, int64(wp.Pid)))
 		}
 	} else {
-		core.Log.Printf("watchdog: already running")
+		logevent.Emit(binlog.TagSystem, logevent.EventWinWatchdogLifecycle,
+			logevent.Str(logevent.AttrStage, logevent.WinWatchdogLifecycleStageAlreadyRunning))
 	}
 	// Monitor the watchdog in the background; restart it if it dies.
 	// stopWatchdogMonitor is closed when main is quitting to stop restarts.
@@ -154,7 +180,8 @@ func main() {
 				case <-stopWatchdogMonitor:
 					return
 				case <-watchdogDone:
-					core.Log.Printf("watchdog: process exited  -  restarting")
+					logevent.Emit(binlog.TagSystem, logevent.EventWinWatchdogLifecycle,
+						logevent.Str(logevent.AttrStage, logevent.WinWatchdogLifecycleStageExitedRestarting))
 				}
 			}
 			// Brief pause before (re)checking / restarting.
@@ -175,11 +202,15 @@ func main() {
 			}
 			wp, err := snwin.StartWatchdog()
 			if err != nil {
-				core.Log.Printf("warn: restart watchdog: %v", err)
+				logevent.Emit(binlog.TagSystem, logevent.EventWinWatchdogLifecycle,
+					logevent.Str(logevent.AttrStage, logevent.WinWatchdogLifecycleStageRestartFailed),
+					logevent.Str(logevent.AttrErr, err.Error()))
 				watchdogProc = nil
 			} else {
 				watchdogProc = wp
-				core.Log.Printf("watchdog: restarted pid=%d", wp.Pid)
+				logevent.Emit(binlog.TagSystem, logevent.EventWinWatchdogLifecycle,
+					logevent.Str(logevent.AttrStage, logevent.WinWatchdogLifecycleStageRestarted),
+					logevent.Int(logevent.AttrPid, int64(wp.Pid)))
 			}
 		}
 	}()
@@ -197,7 +228,9 @@ func main() {
 	// Catch any panic and write it to the log before the process dies.
 	defer func() {
 		if r := recover(); r != nil {
-			core.Log.Printf("PANIC: %v\n%s", r, debug.Stack())
+			logevent.Emit(binlog.TagSystem, logevent.EventWinStartupDiag,
+				logevent.Str(logevent.AttrStage, logevent.WinStartupDiagStagePanic),
+				logevent.Str(logevent.AttrDetail, fmt.Sprintf("%v\n%s", r, debug.Stack())))
 		}
 	}()
 
@@ -207,9 +240,11 @@ func main() {
 	var appWindow *snwin.AppWindow
 
 	if !watchdogRestart {
-		core.Log.Println("showing splash")
+		logevent.Emit(binlog.TagSystem, logevent.EventWinStartupDiag,
+			logevent.Str(logevent.AttrStage, logevent.WinStartupDiagStageSplashShowing))
 		snwin.ShowSplash(core.Version, 5*time.Second)
-		core.Log.Println("splash done")
+		logevent.Emit(binlog.TagSystem, logevent.EventWinStartupDiag,
+			logevent.Str(logevent.AttrStage, logevent.WinStartupDiagStageSplashDone))
 	}
 
 	// Start the app window immediately after the splash so it appears while
@@ -219,7 +254,8 @@ func main() {
 	appWindow.Start()
 
 	// Ã¢"â‚¬Ã¢"â‚¬ 3. Try auto-login with saved key Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬
-	core.Log.Println("loading key")
+	logevent.Emit(binlog.TagSystem, logevent.EventWinStartupDiag,
+		logevent.Str(logevent.AttrStage, logevent.WinStartupDiagStageKeyLoadStart))
 
 	// appDataDir is declared here (before auto-auth) so the relay cache is
 	// accessible during the startup auth loop as well as in onConnect/onLogin.
@@ -258,6 +294,45 @@ func main() {
 
 		mirrorMgr  *core.MirrorManager // torrent-like content mirroring; created once dhtNode+kd are both ready
 		mirrorOnce sync.Once
+
+		// torrentEngine joins this machine into the same swarm the
+		// torrent-seed fleet (opentracker/transmission-daemon) already
+		// seeds client software + manifest torrents through -- see
+		// tunnel_cat/snc/core/torrent.go. Not user-facing, no settings
+		// toggle: gated purely by the arbiter's manifest torrent_enabled
+		// flag (core.TorrentManifestAllowed()), independent of whether the
+		// VPN tunnel itself is connected. Created once at startup;
+		// torrentSlotMagnet/torrentSlotHash track the CURRENT magnet/infohash
+		// per slot (a software package slug, "manifest", or "versions") --
+		// not just an ever-growing set of every magnet ever seen. When a
+		// slot's magnet changes (a new client version was published), the
+		// old infohash is looked up here and removed (stop seeding + delete
+		// its data) before the new one is added, so superseded versions
+		// don't sit around seeded forever.
+		torrentEngine     *core.TorrentEngine
+		torrentOnce       sync.Once
+		torrentSlotMagnet = make(map[string]string)
+		torrentSlotHash   = make(map[string]metainfo.Hash)
+		torrentMu         sync.Mutex
+		torrentUpdateOnce sync.Once
+		// upd is assigned much later (near the tray/window setup) but
+		// referenced from torrentCheckUpdate above -- forward-declared here
+		// for the same reason wireTorrent is, so torrentCheckUpdate can fire
+		// upd.OnReady without duplicating its update-available UX.
+		upd *core.Updater
+		// wireTorrent is assigned below (after globalDisc/appDataDir are in
+		// scope); declared here as a forward reference so wireDHT's fetch
+		// callback (defined earlier in this function) can call it on every
+		// manifest refresh, not just once at startup.
+		wireTorrent func()
+
+		// topupClient drives the on-demand control-list supplement (see
+		// tunnel_cat/snc/core/manifest_topup.go). Recreated whenever savedKey
+		// changes (new/refreshed key = new AuthSig to send); read/written
+		// under topupMu since both the periodic ticker and onConnect can
+		// touch it concurrently.
+		topupMu     sync.Mutex
+		topupClient *core.TopupClient
 	)
 
 	// pickServerURL returns the best server URL to connect to.
@@ -265,7 +340,9 @@ func main() {
 	// Otherwise prefers in-region controls, then falls back to key nodes.
 	pickServerURL := func(kd *core.KeyData) string {
 		if len(forcedControls) > 0 {
-			core.Log.Printf("pickServerURL: forced control %s", forcedControls[0])
+			logevent.Emit(binlog.TagSystem, logevent.EventWinPickServerUrl,
+				logevent.Str(logevent.AttrStage, "forced"),
+				logevent.Str(logevent.AttrAddr, forcedControls[0]))
 			return ensureHTTPS(forcedControls[0])
 		}
 
@@ -288,11 +365,17 @@ func main() {
 		if country != "" && len(regions) > 0 {
 			for _, n := range nodes {
 				if regions[n] == country {
-					core.Log.Printf("pickServerURL: in-region control selected addr=%s cc=%s", n, country)
+					logevent.Emit(binlog.TagSystem, logevent.EventWinPickServerUrl,
+						logevent.Str(logevent.AttrStage, "in_region"),
+						logevent.Str(logevent.AttrAddr, n),
+						logevent.Str(logevent.AttrCc, country))
 					return ensureHTTPS(n)
 				}
 			}
-			core.Log.Printf("pickServerURL: no in-region control found (cc=%s)  -  using %s", country, nodes[0])
+			logevent.Emit(binlog.TagSystem, logevent.EventWinPickServerUrl,
+				logevent.Str(logevent.AttrStage, "no_in_region"),
+				logevent.Str(logevent.AttrAddr, nodes[0]),
+				logevent.Str(logevent.AttrCc, country))
 		}
 		return ensureHTTPS(nodes[0])
 	}
@@ -312,44 +395,71 @@ func main() {
 					discoveredLoadFactors = globalDisc.LoadFactors()
 				}
 				discoveredMu.Unlock()
-				core.Log.Printf("discovery: control list updated: %v", controls)
+				logevent.Emit(binlog.TagSystem, logevent.EventWinDiscovery,
+					logevent.Str(logevent.AttrStage, "control_list_updated"),
+					logevent.Str(logevent.AttrControls, fmt.Sprintf("%v", controls)))
 			})
 			if err != nil {
-				core.Log.Printf("discovery: init failed: %v", err)
+				logevent.Emit(binlog.TagSystem, logevent.EventWinDiscovery,
+					logevent.Str(logevent.AttrStage, "init_failed"),
+					logevent.Str(logevent.AttrErr, err.Error()))
 				return
 			}
 			if err := globalDisc.LoadCached(); err != nil {
-				core.Log.Printf("discovery: no cached manifest: %v", err)
+				logevent.Emit(binlog.TagSystem, logevent.EventWinDiscovery,
+					logevent.Str(logevent.AttrStage, "no_cached_manifest"),
+					logevent.Str(logevent.AttrErr, err.Error()))
 			}
 			globalDisc.UseAsSNIProvider()
 			globalDisc.UseAsFingerprintProvider() // pin control-node certs to the signed manifest (2026-08-07 security fix)
 			// Show admin broadcast notifications  -  deduplicated by ID, 24 h TTL.
 			globalDisc.SetNotificationCallback(func(notifs []core.Notification) {
-				core.Log.Printf("notify: received %d notification(s) from manifest", len(notifs))
+				logevent.Emit(binlog.TagSystem, logevent.EventWinNotification,
+					logevent.Str(logevent.AttrStage, "received"),
+					logevent.Int(logevent.AttrCount, int64(len(notifs))))
 				now := time.Now().Unix()
 				seen := loadNotifSeen()
 				var newMsgs []string
 				for _, n := range notifs {
-					core.Log.Printf("notify: id=%s created_at=%d seen=%v msg=%q", n.ID, n.CreatedAt, seen[n.ID], n.Message)
+					logevent.Emit(binlog.TagSystem, logevent.EventWinNotification,
+						logevent.Str(logevent.AttrStage, "item"),
+						logevent.Str(logevent.AttrNotifId, n.ID),
+						logevent.Int(logevent.AttrCreatedAt, n.CreatedAt),
+						logevent.Bool(logevent.AttrSeen, seen[n.ID]),
+						logevent.Str(logevent.AttrMsg, n.Message))
 					if seen[n.ID] {
 						continue
 					}
 					if now-n.CreatedAt > 24*3600 {
-						core.Log.Printf("notify: id=%s expired (age=%ds), skipping", n.ID, now-n.CreatedAt)
+						logevent.Emit(binlog.TagSystem, logevent.EventWinNotification,
+							logevent.Str(logevent.AttrStage, "item_expired"),
+							logevent.Str(logevent.AttrNotifId, n.ID),
+							logevent.Int(logevent.AttrAgeSec, now-n.CreatedAt))
 						continue
 					}
 					newMsgs = append(newMsgs, n.Message)
 					seen[n.ID] = true
 				}
 				if len(newMsgs) == 0 {
-					core.Log.Printf("notify: nothing new to show")
+					logevent.Emit(binlog.TagSystem, logevent.EventWinNotification,
+						logevent.Str(logevent.AttrStage, "none_new"))
 					return
 				}
-				core.Log.Printf("notify: showing %d new message(s)", len(newMsgs))
+				logevent.Emit(binlog.TagSystem, logevent.EventWinNotification,
+					logevent.Str(logevent.AttrStage, "showing"),
+					logevent.Int(logevent.AttrCount, int64(len(newMsgs))))
 				saveNotifSeen(seen)
 				go snwin.ShowNotification(newMsgs)
 			})
 			globalDisc.Start(10 * time.Minute)
+			// wireTorrent must be reachable from every initDiscovery call
+			// site, not only the ones that also call wireDHT/startDiscovery
+			// -- the auto-login/bootstrap path calls initDiscovery directly
+			// (see its other call site below) and would otherwise never
+			// start the torrent engine or feed it any magnets at all.
+			if wireTorrent != nil {
+				wireTorrent()
+			}
 		})
 	}
 
@@ -384,7 +494,10 @@ func main() {
 				discoveredMu.Lock()
 				discoveredClubControls = flat
 				discoveredMu.Unlock()
-				core.Log.Printf("club-discovery %s: control list updated: %v", slug, controls)
+				logevent.Emit(binlog.TagSystem, logevent.EventWinClubDiscovery,
+					logevent.Str(logevent.AttrStage, "control_list_updated"),
+					logevent.Str(logevent.AttrSlug, slug),
+					logevent.Str(logevent.AttrControls, fmt.Sprintf("%v", controls)))
 			}
 			applyTheme := func() {
 				mu.Lock()
@@ -426,9 +539,14 @@ func main() {
 			if appWindow != nil {
 				appWindow.RecommendFn = func(username string) {
 					if err := core.RecommendCatClubMember(srvURL, tokenFn, username); err != nil {
-						core.Log.Printf("club-recommend: %s: %v", username, err)
+						logevent.Emit(binlog.TagSystem, logevent.EventWinClubRecommend,
+							logevent.Str(logevent.AttrResult, "error"),
+							logevent.Str(logevent.AttrUsername, username),
+							logevent.Str(logevent.AttrErr, err.Error()))
 					} else {
-						core.Log.Printf("club-recommend: recommended %s for Cat Club", username)
+						logevent.Emit(binlog.TagSystem, logevent.EventWinClubRecommend,
+							logevent.Str(logevent.AttrResult, "ok"),
+							logevent.Str(logevent.AttrUsername, username))
 					}
 				}
 			}
@@ -439,7 +557,10 @@ func main() {
 					merge(slug, controls)
 				})
 				if err != nil {
-					core.Log.Printf("club-discovery %s: init failed: %v", slug, err)
+					logevent.Emit(binlog.TagSystem, logevent.EventWinClubDiscovery,
+						logevent.Str(logevent.AttrStage, "init_failed"),
+						logevent.Str(logevent.AttrSlug, slug),
+						logevent.Str(logevent.AttrErr, err.Error()))
 					continue
 				}
 				mu.Lock()
@@ -473,10 +594,14 @@ func main() {
 		}
 		globalDisc.SetFetchCallback(func(raw []byte, ts int64) {
 			dhtNode.SetManifest(raw, ts)
+			if wireTorrent != nil {
+				wireTorrent()
+			}
 		})
 		dhtNode.SetManifestHandler(func(raw []byte) {
 			if err := globalDisc.InjectRaw(raw); err != nil {
-				core.Log.Printf("discovery: DHT gossip manifest rejected: %v", err)
+				logevent.Emit(binlog.TagSystem, logevent.EventWinDhtGossipRejected,
+					logevent.Str(logevent.AttrErr, err.Error()))
 			}
 		})
 	}
@@ -512,7 +637,9 @@ func main() {
 				core.DefaultRelayChunkFetcher(globalDisc),
 			)
 			if err != nil {
-				core.Log.Printf("mirror: init failed: %v", err)
+				logevent.Emit(binlog.TagSystem, logevent.EventWinMirror,
+					logevent.Str(logevent.AttrStage, "init_failed"),
+					logevent.Str(logevent.AttrErr, err.Error()))
 				return
 			}
 			mirrorMgr.LoadCached()
@@ -521,22 +648,221 @@ func main() {
 			dhtNode.SetMirrorPunchHandler(func(peerAddr string) {
 				conn, err := core.Punch("", peerAddr)
 				if err != nil {
-					core.Log.Printf("mirror-server: punch to %s failed: %v", peerAddr, err)
+					logevent.Emit(binlog.TagSystem, logevent.EventWinMirror,
+						logevent.Str(logevent.AttrStage, "server_punch_failed"),
+						logevent.Str(logevent.AttrPeer, peerAddr),
+						logevent.Str(logevent.AttrErr, err.Error()))
 					return
 				}
 				core.NewMirrorConn(conn, mirrorMgr.ServeChunk)
-				core.Log.Printf("mirror-server: serving chunk requests from %s", peerAddr)
+				logevent.Emit(binlog.TagSystem, logevent.EventWinMirror,
+					logevent.Str(logevent.AttrStage, "server_serving"),
+					logevent.Str(logevent.AttrPeer, peerAddr))
 			})
-			core.Log.Printf("mirror: initialized dataDir=%s", filepath.Join(appDataDir, "mirror"))
+			logevent.Emit(binlog.TagSystem, logevent.EventWinMirror,
+				logevent.Str(logevent.AttrStage, "initialized"),
+				logevent.Str(logevent.AttrDataDir, filepath.Join(appDataDir, "mirror")))
 		})
 	}
 
+	// torrentSyncSlot brings one named slot (a software package slug,
+	// "manifest", or "versions") to the given magnet. A no-op if the slot
+	// is already on that exact magnet. When the slot WAS on a different
+	// magnet (a new version got published), the old torrent is stopped and
+	// its data deleted before the new one is added -- superseded versions
+	// must not sit around seeded forever (see the "убрать устаревшие
+	// раздачи" requirement this implements).
+	torrentSyncSlot := func(slot, magnet, label string) {
+		if magnet == "" || torrentEngine == nil {
+			return
+		}
+		torrentMu.Lock()
+		prevMagnet, hadPrev := torrentSlotMagnet[slot]
+		prevHash, hadHash := torrentSlotHash[slot]
+		torrentMu.Unlock()
+		if hadPrev && prevMagnet == magnet {
+			return // unchanged
+		}
+		newHash, err := torrentEngine.AddMagnet(magnet)
+		if err != nil {
+			logevent.Emit(binlog.TagSystem, logevent.EventWinSettingsChange,
+				logevent.Str(logevent.AttrSetting, "torrent_add"),
+				logevent.Str(logevent.AttrDetail, label),
+				logevent.Str(logevent.AttrErr, err.Error()))
+			return
+		}
+		if hadHash {
+			if err := torrentEngine.Remove(prevHash, true); err != nil {
+				logevent.Emit(binlog.TagSystem, logevent.EventWinSettingsChange,
+					logevent.Str(logevent.AttrSetting, "torrent_remove_stale"),
+					logevent.Str(logevent.AttrDetail, label),
+					logevent.Str(logevent.AttrErr, err.Error()))
+			} else {
+				logevent.Emit(binlog.TagSystem, logevent.EventWinSettingsChange,
+					logevent.Str(logevent.AttrSetting, "torrent_remove_stale"),
+					logevent.Str(logevent.AttrDetail, label),
+					logevent.Str(logevent.AttrStage, "removed"))
+			}
+		}
+		torrentMu.Lock()
+		torrentSlotMagnet[slot] = magnet
+		torrentSlotHash[slot] = newHash
+		torrentMu.Unlock()
+		logevent.Emit(binlog.TagSystem, logevent.EventWinSettingsChange,
+			logevent.Str(logevent.AttrSetting, "torrent_add"),
+			logevent.Str(logevent.AttrDetail, label),
+			logevent.Str(logevent.AttrStage, "added"))
+	}
+	// torrentUpdateSlug picks which OTA distributable this client should
+	// watch for over torrent, mirroring core.Updater.checkAndDownload's own
+	// two-strategy logic exactly (see updater.go's doc comment) so the
+	// torrent path and the existing HTTP path always agree on which slug is
+	// authoritative for this particular install.
+	torrentUpdateSlug := func() string {
+		if snwin.IsInstalledByInstaller() {
+			return "windows"
+		}
+		return "windows-installer"
+	}
+	// torrentCheckUpdate looks at the "versions" torrent (once downloaded)
+	// for the update slug's version; if newer than the running build, waits
+	// for that slug's own software torrent to finish downloading, extracts
+	// it via the same path core.Updater's HTTP flow uses, and fires the
+	// exact same upd.OnReady callback -- so the update-available UX (tray
+	// notification, dialog, ApplyPendingUpdate) is identical regardless of
+	// which channel actually delivered the bytes.
+	torrentCheckUpdate := func() {
+		if torrentEngine == nil {
+			return
+		}
+		dataDir := filepath.Join(appDataDir, "torrents")
+		var versionsDone bool
+		for _, it := range torrentEngine.List() {
+			if it.HaveInfo && it.Name == "versions.json" && it.Done {
+				versionsDone = true
+				break
+			}
+		}
+		if !versionsDone {
+			return
+		}
+		raw, err := os.ReadFile(filepath.Join(dataDir, "versions.json"))
+		if err != nil {
+			return
+		}
+		var versions map[string]struct {
+			Available bool   `json:"available"`
+			Version   string `json:"version"`
+		}
+		if err := json.Unmarshal(raw, &versions); err != nil {
+			logevent.Emit(binlog.TagSystem, logevent.EventWinSettingsChange,
+				logevent.Str(logevent.AttrSetting, "torrent_update"),
+				logevent.Str(logevent.AttrStage, "versions_parse_failed"),
+				logevent.Str(logevent.AttrErr, err.Error()))
+			return
+		}
+		slug := torrentUpdateSlug()
+		entry, ok := versions[slug]
+		// Same numeric-YYYYMMDDHHMM comparison convention as
+		// core.Updater.checkAndDownload -- version strings sort correctly
+		// as plain strings since they're fixed-width zero-padded.
+		if !ok || !entry.Available || entry.Version == "" || entry.Version <= core.Version {
+			return
+		}
+		var softwareDone bool
+		var softwareName string
+		// Match by tracked slot hash directly rather than re-parsing the
+		// magnet's btih out of the URI a second time.
+		torrentMu.Lock()
+		wantHash, haveWant := torrentSlotHash[slug]
+		torrentMu.Unlock()
+		if !haveWant {
+			return
+		}
+		for _, it := range torrentEngine.List() {
+			if it.InfoHash == wantHash.HexString() && it.HaveInfo && it.Done {
+				softwareDone = true
+				softwareName = it.Name
+				break
+			}
+		}
+		if !softwareDone {
+			return
+		}
+		torrentUpdateOnce.Do(func() {
+			zipPath := filepath.Join(dataDir, softwareName)
+			if err := core.ApplyTorrentDownloadedZip(zipPath, snwin.IsInstalledByInstaller()); err != nil {
+				logevent.Emit(binlog.TagSystem, logevent.EventWinSettingsChange,
+					logevent.Str(logevent.AttrSetting, "torrent_update"),
+					logevent.Str(logevent.AttrStage, "apply_failed"),
+					logevent.Str(logevent.AttrErr, err.Error()))
+				return
+			}
+			logevent.Emit(binlog.TagSystem, logevent.EventWinSettingsChange,
+				logevent.Str(logevent.AttrSetting, "torrent_update"),
+				logevent.Str(logevent.AttrStage, "ready"),
+				logevent.Str(logevent.AttrDetail, entry.Version))
+			if upd != nil && upd.OnReady != nil {
+				upd.OnReady(entry.Version)
+			}
+		})
+	}
+	torrentCheckMagnets := func() {
+		if globalDisc == nil || torrentEngine == nil {
+			return
+		}
+		magnets := globalDisc.TorrentMagnets()
+		for slug, m := range magnets {
+			torrentSyncSlot(slug, m, "software:"+slug)
+		}
+		torrentSyncSlot("manifest", globalDisc.ManifestTorrentMagnet(), "manifest")
+		torrentCheckUpdate()
+	}
+	wireTorrent = func() {
+		if globalDisc == nil {
+			return
+		}
+		torrentOnce.Do(func() {
+			torrentEngine = core.NewTorrentEngine(filepath.Join(appDataDir, "torrents"))
+			if err := torrentEngine.Start(); err != nil {
+				logevent.Emit(binlog.TagSystem, logevent.EventWinSettingsChange,
+					logevent.Str(logevent.AttrSetting, "torrent_engine"),
+					logevent.Str(logevent.AttrErr, err.Error()))
+				torrentEngine = nil
+				return
+			}
+			logevent.Emit(binlog.TagSystem, logevent.EventWinSettingsChange,
+				logevent.Str(logevent.AttrSetting, "torrent_engine"),
+				logevent.Str(logevent.AttrStage, "started"))
+			// globalDisc.TorrentMagnets()/ManifestTorrentMagnet() are only
+			// populated after the discoverer's first successful fetch,
+			// which may not have completed yet at this exact call site (it
+			// races Start()'s own async fetch, and some call paths --
+			// e.g. the auto-login/bootstrap path -- never trigger a second
+			// call to wireTorrent at all). Poll independently of any
+			// specific fetch-completion hook so magnets are picked up
+			// whenever they actually arrive, on every code path -- this
+			// same loop also re-checks the "versions" torrent for updates
+			// once it and the relevant software torrent finish downloading.
+			go func() {
+				t := time.NewTicker(2 * time.Minute)
+				defer t.Stop()
+				torrentCheckMagnets()
+				for range t.C {
+					torrentCheckMagnets()
+				}
+			}()
+		})
+		torrentCheckMagnets()
+	}
+
 	// startDiscovery is kept for call-site compatibility; it now delegates to
-	// initDiscovery (idempotent) + wireDHT + wireMirror.
+	// initDiscovery (idempotent) + wireDHT + wireMirror + wireTorrent.
 	startDiscovery := func(srvURL string, kd *core.KeyData, dhtNode *core.DHTNode) {
 		initDiscovery(srvURL, kd)
 		wireDHT(dhtNode)
 		wireMirror(dhtNode, kd)
+		wireTorrent()
 	}
 
 	// deviceID is loaded below (after appDataDir), but declared here so the
@@ -556,9 +882,12 @@ func main() {
 			}
 			if keyStr != "" {
 				if saveErr := snwin.SaveKey(keyStr); saveErr == nil {
-					core.Log.Printf("deep-link: key saved from navlink:// URL")
+					logevent.Emit(binlog.TagSystem, logevent.EventWinDeepLink,
+						logevent.Str(logevent.AttrResult, "ok"))
 				} else {
-					core.Log.Printf("deep-link: could not save key: %v", saveErr)
+					logevent.Emit(binlog.TagSystem, logevent.EventWinDeepLink,
+						logevent.Str(logevent.AttrResult, "error"),
+						logevent.Str(logevent.AttrErr, saveErr.Error()))
 				}
 			}
 		}
@@ -571,7 +900,30 @@ func main() {
 		savedKey  *core.KeyData // non-nil when a valid key is on disk
 	)
 	if keyStr, err := snwin.LoadKey(); err == nil {
-		if kd, err := core.ParseKeyString(keyStr); err == nil && len(kd.Nodes()) > 0 {
+		kd, err := core.ParseKeyString(keyStr)
+		if err == nil && kd.IsLegacy() {
+			// Legacy (V1, unsigned) key found on disk: its ControlNodes/
+			// Servers list is not verifiable (see snc/shared/keymigrate's
+			// doc comment), so it must not be dialed as-is. Migrate first;
+			// on failure, treat as if no usable key were on disk at all --
+			// do NOT fall through to auto-connecting with the unverified
+			// list below.
+			core.Log.Printf("startup: legacy V1 key on disk for %s, migrating to V2", kd.Username)
+			migCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			newKeyStr, newKD, migErr := keymigrate.Migrate(migCtx, kd)
+			cancel()
+			if migErr != nil {
+				core.Log.Printf("startup: legacy key migration failed, skipping auto-connect: %v", migErr)
+				kd, err = nil, fmt.Errorf("legacy key migration failed: %w", migErr)
+			} else {
+				core.Log.Printf("startup: legacy key migrated OK, key_id=%s", newKD.KeyID)
+				if saveErr := snwin.SaveKey(newKeyStr); saveErr != nil {
+					core.Log.Printf("startup: could not persist migrated key: %v", saveErr)
+				}
+				keyStr, kd = newKeyStr, newKD
+			}
+		}
+		if err == nil && len(kd.Nodes()) > 0 {
 			savedKey = kd
 			// A key's embedded ControlNodes is bootstrap-only: once a manifest
 			// has ever been cached, it is authoritative and the key's node
@@ -590,14 +942,25 @@ func main() {
 			// loginURL authenticates to one control URL and returns the authenticator
 			// on success, nil on failure. No side effects â€” safe to call concurrently.
 			loginURL := func(url string) *core.Authenticator {
-				core.Log.Printf("auto-auth user %s @ %s", kd.Username, url)
+				logevent.Emit(binlog.TagSystem, logevent.EventWinAuth,
+					logevent.Str(logevent.AttrFlow, "auto"),
+					logevent.Str(logevent.AttrStage, "trying"),
+					logevent.Str(logevent.AttrUser, kd.Username),
+					logevent.Str(logevent.AttrUrl, url))
 				a := core.NewAuthenticator(url, kd.APIKey, kd.Username, kd.Password)
 				a.SetKeyAuth(kd)
 				if err := a.Login(); err != nil {
-					core.Log.Printf("auto-auth failed %s: %v", url, err)
+					logevent.Emit(binlog.TagSystem, logevent.EventWinAuth,
+						logevent.Str(logevent.AttrFlow, "auto"),
+						logevent.Str(logevent.AttrStage, "failed"),
+						logevent.Str(logevent.AttrUrl, url),
+						logevent.Str(logevent.AttrErr, err.Error()))
 					return nil
 				}
-				core.Log.Printf("auto-auth OK %s token=%s...", url, a.Token()[:8])
+				logevent.Emit(binlog.TagSystem, logevent.EventWinAuth,
+					logevent.Str(logevent.AttrFlow, "auto"),
+					logevent.Str(logevent.AttrStage, "ok"),
+					logevent.Str(logevent.AttrUrl, url))
 				return a
 			}
 			// applyAuth wires a successful authenticator into the global dialer state.
@@ -652,9 +1015,16 @@ func main() {
 					cc := loadCountry(appDataDir)
 					for _, relay := range core.RelaysByCountry(cachedRelays, cc) {
 						url := ensureHTTPS(relay.Addr)
-						core.Log.Printf("auto-auth: trying relay=%s cc=%s", relay.Addr, relay.CountryCode)
+						logevent.Emit(binlog.TagSystem, logevent.EventWinAuth,
+							logevent.Str(logevent.AttrFlow, "auto"),
+							logevent.Str(logevent.AttrStage, "relay_trying"),
+							logevent.Str(logevent.AttrAddr, relay.Addr),
+							logevent.Str(logevent.AttrRelayCc, relay.CountryCode))
 						if a := loginURL(url); a != nil {
-							core.Log.Printf("auto-auth: via relay OK relay=%s", relay.Addr)
+							logevent.Emit(binlog.TagSystem, logevent.EventWinAuth,
+								logevent.Str(logevent.AttrFlow, "auto"),
+								logevent.Str(logevent.AttrStage, "relay_ok"),
+								logevent.Str(logevent.AttrAddr, relay.Addr))
 							authOK = true
 							applyAuth(a, url)
 							break
@@ -664,13 +1034,21 @@ func main() {
 			}
 			if authOK {
 			} else {
-				core.Log.Printf("auto-auth: all nodes unreachable")
+				logevent.Emit(binlog.TagSystem, logevent.EventWinAuth,
+					logevent.Str(logevent.AttrFlow, "auto"),
+					logevent.Str(logevent.AttrStage, "all_unreachable"))
 			}
 		} else {
-			core.Log.Printf("saved key invalid: %v", err)
+			logevent.Emit(binlog.TagSystem, logevent.EventWinAuth,
+				logevent.Str(logevent.AttrFlow, "auto"),
+				logevent.Str(logevent.AttrStage, "saved_key_invalid"),
+				logevent.Str(logevent.AttrErr, err.Error()))
 		}
 	} else {
-		core.Log.Printf("no saved key: %v", err)
+		logevent.Emit(binlog.TagSystem, logevent.EventWinAuth,
+			logevent.Str(logevent.AttrFlow, "auto"),
+			logevent.Str(logevent.AttrStage, "no_saved_key"),
+			logevent.Str(logevent.AttrErr, err.Error()))
 	}
 	// Show Connect whenever a key exists  -  even if auto-auth failed.
 	// onConnect handles re-auth with saved credentials before dialling.
@@ -683,14 +1061,18 @@ func main() {
 
 	// Load or generate stable device UUID for key-binding enforcement (M4+).
 	deviceID = loadOrCreateDeviceID(appDataDir)
-	core.Log.Printf("device ID: %.8s...", deviceID)
+	logevent.Emit(binlog.TagSystem, logevent.EventWinDeviceId, logevent.Str(logevent.AttrValue, deviceID))
 
 	nodeID, err := core.LoadOrGenNodeID(appDataDir)
 	if err != nil {
-		core.Log.Printf("warn: could not load/gen node ID: %v", err)
+		logevent.Emit(binlog.TagSystem, logevent.EventWinNodeId,
+			logevent.Str(logevent.AttrStage, "load_failed"),
+			logevent.Str(logevent.AttrErr, err.Error()))
 		nodeID = "unknown"
 	}
-	core.Log.Printf("node ID: %.8s...", nodeID)
+	logevent.Emit(binlog.TagSystem, logevent.EventWinNodeId,
+		logevent.Str(logevent.AttrStage, "loaded"),
+		logevent.Str(logevent.AttrValue, nodeID))
 
 	router := core.NewRouter()
 	router.SetSelfNodeID(nodeID)
@@ -713,7 +1095,10 @@ func main() {
 			dhtNode.Bootstrap(nil)                                           // load peers.json cache; no network seeds yet
 			dhtNode.LoadRelays(filepath.Join(appDataDir, "dht_relays.json")) //nolint:errcheck
 			dhtNode.Start()
-			core.Log.Printf("dht: node started id=%.8s... addr=%s", nodeID, udpConn.LocalAddr())
+			logevent.Emit(binlog.TagSystem, logevent.EventWinDht,
+				logevent.Str(logevent.AttrStage, "started"),
+				logevent.Str(logevent.AttrNodeId, nodeID),
+				logevent.Str(logevent.AttrAddr, udpConn.LocalAddr().String()))
 
 			// Relay server: when another client wants to use us as relay, it sends
 			// MsgHolePunch with its external addr and the control it wants to reach.
@@ -721,11 +1106,17 @@ func main() {
 			dhtNode.SetHolePunchHandler(func(peerAddr, controlURL string) {
 				conn, err := core.Punch("", peerAddr)
 				if err != nil {
-					core.Log.Printf("relay-server: punch to %s failed: %v", peerAddr, err)
+					logevent.Emit(binlog.TagSystem, logevent.EventWinDht,
+						logevent.Str(logevent.AttrStage, "relay_server_punch_failed"),
+						logevent.Str(logevent.AttrPeer, peerAddr),
+						logevent.Str(logevent.AttrErr, err.Error()))
 					return
 				}
 				relay := core.NewUDPRelayConn(conn, controlURL)
-				core.Log.Printf("relay-server: serving %s â†’ %s", peerAddr, controlURL)
+				logevent.Emit(binlog.TagSystem, logevent.EventWinDht,
+					logevent.Str(logevent.AttrStage, "relay_server_serving"),
+					logevent.Str(logevent.AttrPeer, peerAddr),
+					logevent.Str(logevent.AttrControlUrl, controlURL))
 				// relay.readLoop runs in the background; when the peer marks it
 				// Failed we just close â€” no keepalive from our side needed (client
 				// sends pings, we send pongs).
@@ -735,17 +1126,23 @@ func main() {
 				}()
 			})
 		} else {
-			core.Log.Printf("dht: UDP listen failed: %v  -  DHT disabled", err)
+			logevent.Emit(binlog.TagSystem, logevent.EventWinDht,
+				logevent.Str(logevent.AttrStage, "listen_failed"),
+				logevent.Str(logevent.AttrErr, err.Error()))
 		}
 	} else {
-		core.Log.Printf("dht: bad node ID %q  -  DHT disabled", nodeID)
+		logevent.Emit(binlog.TagSystem, logevent.EventWinDht,
+			logevent.Str(logevent.AttrStage, "bad_node_id"),
+			logevent.Str(logevent.AttrNodeId, nodeID))
 	}
 
 	// Load persisted country so regional routing works correctly from the
 	// very first connect after a restart.
 	if cc := loadCountry(appDataDir); cc != "" {
 		lastKnownCountry = cc
-		core.Log.Printf("router: loaded persisted country %q", cc)
+		logevent.Emit(binlog.TagSystem, logevent.EventWinGeo,
+			logevent.Str(logevent.AttrStage, "persisted_country_loaded"),
+			logevent.Str(logevent.AttrCc, cc))
 	}
 
 	// Load user settings early so all goroutines (GPS, country checker) can read
@@ -756,7 +1153,9 @@ func main() {
 	if settings.PreferredRegion != "" {
 		lastKnownCountry = settings.PreferredRegion
 		router.SetMyCountry(settings.PreferredRegion)
-		core.Log.Printf("geo: explicit region %q applied from settings", settings.PreferredRegion)
+		logevent.Emit(binlog.TagSystem, logevent.EventWinGeo,
+			logevent.Str(logevent.AttrStage, "explicit_region_applied"),
+			logevent.Str(logevent.AttrCc, settings.PreferredRegion))
 	}
 
 	// Detect device country from GPS/locale/timezone in background.
@@ -776,9 +1175,14 @@ func main() {
 			if settings.PreferredRegion == "" {
 				router.SetMyCountry(cc)
 				saveCountry(appDataDir, cc)
-				core.Log.Printf("geo: device country=%q applied", cc)
+				logevent.Emit(binlog.TagSystem, logevent.EventWinGeo,
+					logevent.Str(logevent.AttrStage, "device_country_applied"),
+					logevent.Str(logevent.AttrCc, cc))
 			} else {
-				core.Log.Printf("geo: device country=%q stored (explicit region %q active)", cc, settings.PreferredRegion)
+				logevent.Emit(binlog.TagSystem, logevent.EventWinGeo,
+					logevent.Str(logevent.AttrStage, "device_country_stored"),
+					logevent.Str(logevent.AttrCc, cc),
+					logevent.Str(logevent.AttrRegion, settings.PreferredRegion))
 			}
 		}
 	}()
@@ -825,6 +1229,58 @@ func main() {
 		poolRefreshStop   chan struct{} // closed to stop the pool refresh goroutine
 	)
 
+	// runTopup drives one manifest-topup round (see
+	// tunnel_cat/snc/core/manifest_topup.go): while router has fewer than its
+	// target live control count, ask navlink.net directly (bypassing TUN,
+	// same as the discoverer's navlink fallback) for one more, e2e-probe it,
+	// and fold it into router if it's actually reachable. Safe to call
+	// whether the tunnel is currently connected or disconnected, and safe to
+	// call concurrently from both the periodic ticker and a fresh connect --
+	// see TopupClient.Run's doc comment for why overlap is harmless.
+	runTopup := func() {
+		if savedKey == nil || router == nil {
+			return
+		}
+		topupMu.Lock()
+		if topupClient == nil {
+			topupClient = core.NewTopupClientFromKey("https://navlink.net", savedKey,
+				func() string {
+					if routes == nil {
+						return ""
+					}
+					return routes.LocalAddr()
+				}, nil)
+		}
+		tc := topupClient
+		topupMu.Unlock()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		tc.Run(ctx,
+			router.AllControlAddrs,
+			func() int { return len(router.QualifyingControlAddrs()) },
+			func(addr string) bool { return core.QuickHealthCheck(addr, 5*time.Second) },
+			func(addr string) {
+				router.AddControl(addr)
+				router.BuildPaths()
+				core.Log.Printf("manifest-topup: added control %s to router", addr)
+			},
+		)
+	}
+
+	// Manifest topup runs for the whole process lifetime, independent of
+	// connect/disconnect (see runTopup's doc comment above) -- on its own
+	// 5-minute tick, and also triggered once right after each successful
+	// connect (see the onConnect call further down). No stop channel: the
+	// process exiting is what stops it, same as dhtNode/connStatsCollector.
+	go func() {
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		for range ticker.C {
+			runTopup()
+		}
+	}()
+
 	// onLogin shows the key dialog (or, for users with no key yet, the
 	// "do you have a key?" branch that can end in a direct navlink.net
 	// login + automatic key issuance), authenticates, and wires up the dialer.
@@ -841,16 +1297,48 @@ func main() {
 			return fmt.Errorf("key contains no server addresses")
 		}
 
+		// Legacy (V1, unsigned) key: its ControlNodes/Servers list is not
+		// verifiable (see snc/shared/keymigrate's doc comment) -- silently
+		// exchange it for a fresh, arbiter-signed V2 key using the
+		// credentials it carries, authenticated against navlink.net
+		// directly rather than anything derived from the key itself. If
+		// this fails, the key is treated as unauthenticated: we do NOT
+		// fall back to dialing its own (unverifiable) node list.
+		if kd.IsLegacy() {
+			core.Log.Printf("login: legacy V1 key detected for %s, migrating to V2", kd.Username)
+			migCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			newKeyStr, newKD, migErr := keymigrate.Migrate(migCtx, kd)
+			cancel()
+			if migErr != nil {
+				core.Log.Printf("login: legacy key migration failed: %v", migErr)
+				return fmt.Errorf("could not renew your key (please try again or contact support): %w", migErr)
+			}
+			core.Log.Printf("login: legacy key migrated OK, key_id=%s", newKD.KeyID)
+			keyStr = newKeyStr
+			kd = newKD
+		}
+
 		tryLoginAuth := func(url string) bool {
-			core.Log.Printf("login: auth user %s @ %s", kd.Username, url)
+			logevent.Emit(binlog.TagSystem, logevent.EventWinAuth,
+				logevent.Str(logevent.AttrFlow, "manual"),
+				logevent.Str(logevent.AttrStage, "trying"),
+				logevent.Str(logevent.AttrUser, kd.Username),
+				logevent.Str(logevent.AttrUrl, url))
 			a := core.NewAuthenticator(url, kd.APIKey, kd.Username, kd.Password)
 			a.SetKeyAuth(kd)
 			a.SetDeviceInfo(kd.KeyID, deviceID, "Windows PC")
 			if err := a.Login(); err != nil {
-				core.Log.Printf("login: auth failed %s: %v", url, err)
+				logevent.Emit(binlog.TagSystem, logevent.EventWinAuth,
+					logevent.Str(logevent.AttrFlow, "manual"),
+					logevent.Str(logevent.AttrStage, "failed"),
+					logevent.Str(logevent.AttrUrl, url),
+					logevent.Str(logevent.AttrErr, err.Error()))
 				return false
 			}
-			core.Log.Printf("login: auth OK %s token=%s...", url, a.Token()[:8])
+			logevent.Emit(binlog.TagSystem, logevent.EventWinAuth,
+				logevent.Str(logevent.AttrFlow, "manual"),
+				logevent.Str(logevent.AttrStage, "ok"),
+				logevent.Str(logevent.AttrUrl, url))
 			dialer = core.NewTunnelDialer(a)
 			serverURL = url
 			go startDiscovery(url, kd, dhtNode)
@@ -878,9 +1366,16 @@ func main() {
 				cc := loadCountry(appDataDir)
 				for _, relay := range core.RelaysByCountry(cachedRelays, cc) {
 					url := ensureHTTPS(relay.Addr)
-					core.Log.Printf("login: trying relay=%s cc=%s", relay.Addr, relay.CountryCode)
+					logevent.Emit(binlog.TagSystem, logevent.EventWinAuth,
+						logevent.Str(logevent.AttrFlow, "manual"),
+						logevent.Str(logevent.AttrStage, "relay_trying"),
+						logevent.Str(logevent.AttrAddr, relay.Addr),
+						logevent.Str(logevent.AttrRelayCc, relay.CountryCode))
 					if tryLoginAuth(url) {
-						core.Log.Printf("login: via relay OK relay=%s", relay.Addr)
+						logevent.Emit(binlog.TagSystem, logevent.EventWinAuth,
+							logevent.Str(logevent.AttrFlow, "manual"),
+							logevent.Str(logevent.AttrStage, "relay_ok"),
+							logevent.Str(logevent.AttrAddr, relay.Addr))
 						authOK = true
 						break
 					}
@@ -892,13 +1387,16 @@ func main() {
 		}
 		savedKey = kd
 		if saveErr := snwin.SaveKey(keyStr); saveErr != nil {
-			core.Log.Printf("warn: could not save key: %v", saveErr)
+			logevent.Emit(binlog.TagSystem, logevent.EventWinKeySaveFailed, logevent.Str(logevent.AttrErr, saveErr.Error()))
 		}
 		if !snwin.IsCurrentExeAutostarted() {
 			if err := snwin.RegisterAutostart(); err != nil {
-				core.Log.Printf("warn: autostart register: %v", err)
+				logevent.Emit(binlog.TagSystem, logevent.EventWinAutostart,
+					logevent.Str(logevent.AttrResult, "error"),
+					logevent.Str(logevent.AttrErr, err.Error()))
 			} else {
-				core.Log.Println("autostart: registered")
+				logevent.Emit(binlog.TagSystem, logevent.EventWinAutostart,
+					logevent.Str(logevent.AttrResult, "ok"))
 			}
 		}
 		return nil
@@ -928,7 +1426,9 @@ func main() {
 		}
 		exe, err := os.Executable()
 		if err != nil {
-			core.Log.Printf("firewall: cannot get executable path: %v", err)
+			logevent.Emit(binlog.TagSystem, logevent.EventWinFirewall,
+				logevent.Str(logevent.AttrStage, "exe_path_failed"),
+				logevent.Str(logevent.AttrErr, err.Error()))
 			return
 		}
 		// Silently remove any stale rule left by a previous crashed session.
@@ -939,11 +1439,16 @@ func main() {
 			"program="+exe, "enable=yes",
 		).CombinedOutput()
 		if err != nil {
-			core.Log.Printf("firewall: add outbound rule failed: %v (%s)", err, strings.TrimSpace(string(out)))
+			logevent.Emit(binlog.TagSystem, logevent.EventWinFirewall,
+				logevent.Str(logevent.AttrStage, "add_failed"),
+				logevent.Str(logevent.AttrErr, err.Error()),
+				logevent.Str(logevent.AttrDetail, strings.TrimSpace(string(out))))
 			return
 		}
 		fwRuleInstalled = true
-		core.Log.Printf("firewall: outbound allow rule added for %s", filepath.Base(exe))
+		logevent.Emit(binlog.TagSystem, logevent.EventWinFirewall,
+			logevent.Str(logevent.AttrStage, "added"),
+			logevent.Str(logevent.AttrExe, filepath.Base(exe)))
 	}
 
 	removeOutboundFirewallRule := func() {
@@ -954,11 +1459,14 @@ func main() {
 			"name="+fwRuleName,
 		).CombinedOutput()
 		if err != nil {
-			core.Log.Printf("firewall: delete outbound rule failed: %v (%s)", err, strings.TrimSpace(string(out)))
+			logevent.Emit(binlog.TagSystem, logevent.EventWinFirewall,
+				logevent.Str(logevent.AttrStage, "delete_failed"),
+				logevent.Str(logevent.AttrErr, err.Error()),
+				logevent.Str(logevent.AttrDetail, strings.TrimSpace(string(out))))
 			return
 		}
 		fwRuleInstalled = false
-		core.Log.Printf("firewall: outbound allow rule removed")
+		logevent.Emit(binlog.TagSystem, logevent.EventWinFirewall, logevent.Str(logevent.AttrStage, "removed"))
 	}
 
 	onConnect := func(autoReconnect bool) error {
@@ -992,7 +1500,9 @@ func main() {
 		// Wire the hook on the existing dialer if present (may be from auto-login
 		// or onLogin, which run before this closure is defined).  Re-wiring on
 		// reconnect is harmless  -  SetRTTUpdateHook just replaces the callback.
-		core.Log.Printf("connect: dialer=%v trayApp=%v", dialer != nil, trayApp != nil)
+		logevent.Emit(binlog.TagSystem, logevent.EventWinConnectStart,
+			logevent.Bool(logevent.AttrDialerPresent, dialer != nil),
+			logevent.Bool(logevent.AttrTrayPresent, trayApp != nil))
 		if dialer != nil {
 			wireDialer(dialer)
 		}
@@ -1001,12 +1511,18 @@ func main() {
 		// silently with saved credentials before attempting to connect.
 		if dialer == nil && savedKey != nil {
 			srvURL := pickServerURL(savedKey)
-			core.Log.Printf("connect: re-auth user %s @ %s", savedKey.Username, srvURL)
+			logevent.Emit(binlog.TagSystem, logevent.EventWinConnectReauth,
+				logevent.Str(logevent.AttrStage, "trying"),
+				logevent.Str(logevent.AttrUser, savedKey.Username),
+				logevent.Str(logevent.AttrUrl, srvURL))
 			a := core.NewAuthenticator(srvURL, savedKey.APIKey, savedKey.Username, savedKey.Password)
 			a.SetKeyAuth(savedKey)
 			a.SetDeviceInfo(savedKey.KeyID, deviceID, "Windows PC")
 			if err := a.Login(); err != nil {
-				core.Log.Printf("connect: re-auth direct failed: %v â€” trying UDP relay bootstrap", err)
+				logevent.Emit(binlog.TagSystem, logevent.EventWinConnectReauth,
+					logevent.Str(logevent.AttrStage, "direct_failed"),
+					logevent.Str(logevent.AttrUrl, srvURL),
+					logevent.Str(logevent.AttrErr, err.Error()))
 				// Fallback: bootstrap via DHT UDP relay when TCP is blocked.
 				udpOK := false
 				if dhtNode != nil {
@@ -1027,7 +1543,10 @@ func main() {
 								time.Sleep(150 * time.Millisecond)
 								conn, perr := core.Punch("", entry.Addr)
 								if perr != nil {
-									core.Log.Printf("connect: udp-relay punch %s: %v", entry.Addr, perr)
+									logevent.Emit(binlog.TagSystem, logevent.EventWinConnectUdpRelay,
+										logevent.Str(logevent.AttrStage, "punch_failed"),
+										logevent.Str(logevent.AttrRelayAddr, entry.Addr),
+										logevent.Str(logevent.AttrErr, perr.Error()))
 									continue
 								}
 								rc := core.NewUDPRelayConn(conn, "")
@@ -1035,11 +1554,18 @@ func main() {
 								ra.SetKeyAuth(savedKey)
 								ra.SetDeviceInfo(savedKey.KeyID, deviceID, "Windows PC")
 								if rerr := ra.LoginViaUDP(rc); rerr != nil {
-									core.Log.Printf("connect: udp-relay %sâ†’%s: %v", entry.Addr, ctrlNode, rerr)
+									logevent.Emit(binlog.TagSystem, logevent.EventWinConnectUdpRelay,
+										logevent.Str(logevent.AttrStage, "login_failed"),
+										logevent.Str(logevent.AttrRelayAddr, entry.Addr),
+										logevent.Str(logevent.AttrCtrl, ctrlNode),
+										logevent.Str(logevent.AttrErr, rerr.Error()))
 									rc.Close()
 									continue
 								}
-								core.Log.Printf("connect: re-auth via UDP relay OK relay=%s ctrl=%s", entry.Addr, ctrlNode)
+								logevent.Emit(binlog.TagSystem, logevent.EventWinConnectUdpRelay,
+									logevent.Str(logevent.AttrStage, "ok"),
+									logevent.Str(logevent.AttrRelayAddr, entry.Addr),
+									logevent.Str(logevent.AttrCtrl, ctrlNode))
 								dialer = wireDialer(core.NewUDPRelayDialer(rc, ra))
 								serverURL = ctrlURL
 								udpOK = true
@@ -1052,7 +1578,9 @@ func main() {
 					return fmt.Errorf("authentication failed: %w", err)
 				}
 			} else {
-				core.Log.Printf("connect: re-auth OK, token=%s...", a.Token()[:8])
+				logevent.Emit(binlog.TagSystem, logevent.EventWinConnectReauth,
+					logevent.Str(logevent.AttrStage, "ok"),
+					logevent.Str(logevent.AttrUrl, srvURL))
 				dialer = wireDialer(core.NewTunnelDialer(a))
 				serverURL = srvURL
 			}
@@ -1076,7 +1604,8 @@ func main() {
 				for _, n := range forcedControls {
 					allCtrlAddrs = append(allCtrlAddrs, hostNameOf(n)+":443")
 				}
-				core.Log.Printf("connect: using forced controls: %v", allCtrlAddrs)
+				logevent.Emit(binlog.TagSystem, logevent.EventWinConnectControls,
+					logevent.Str(logevent.AttrList, fmt.Sprintf("%v", allCtrlAddrs)))
 				router.SetControlsWithRegions(allCtrlAddrs, nil)
 			} else {
 				if savedKey != nil {
@@ -1109,21 +1638,25 @@ func main() {
 			}
 		}
 
-		core.Log.Printf("connect: fetching relay list")
+		logevent.Emit(binlog.TagSystem, logevent.EventWinConnectRelays, logevent.Str(logevent.AttrStage, "fetching"))
 		var fetchedRelays []core.RelayEntry
 		if relays, err := core.FetchRelayList(relayAPIURL); err == nil {
 			fetchedRelays = relays
 			router.UpdateRelays(relays)
 			if err := core.SaveRelayList(filepath.Join(appDataDir, "relays.json"), relays); err != nil {
-				core.Log.Printf("connect: save relay list: %v", err)
+				logevent.Emit(binlog.TagSystem, logevent.EventWinConnectRelays,
+					logevent.Str(logevent.AttrStage, "save_failed"),
+					logevent.Str(logevent.AttrErr, err.Error()))
 			}
 		} else {
-			core.Log.Printf("connect: relay list fetch failed (%v)  -  will route direct", err)
+			logevent.Emit(binlog.TagSystem, logevent.EventWinConnectRelays,
+				logevent.Str(logevent.AttrStage, "fetch_failed"),
+				logevent.Str(logevent.AttrErr, err.Error()))
 			router.UpdateRelays(nil)
 		}
-		core.Log.Printf("connect: probing data plane")
+		logevent.Emit(binlog.TagSystem, logevent.EventWinConnectRelays, logevent.Str(logevent.AttrStage, "probing_data_plane"))
 		router.ProbeDataPlane(3 * time.Second)
-		core.Log.Printf("connect: building paths")
+		logevent.Emit(binlog.TagSystem, logevent.EventWinConnectRelays, logevent.Str(logevent.AttrStage, "building_paths"))
 		// Restore my-country before BuildPaths: disconnect clears it, and the
 		// country-checker goroutine may be skipped (GPS/explicit region).
 		discoveredMu.RLock()
@@ -1140,12 +1673,13 @@ func main() {
 		// differences would destabilise an already-connected session.
 		if better, p := router.PrimaryIsBetter(serverURL, 1.5); better && p != nil {
 			preferred := ensureHTTPS(p.ControlAddr)
-			core.Log.Printf("connect: router prefers control %s over %s (â‰¥50%% better) â€” switching", p.ControlAddr, serverURL)
+			logevent.Emit(binlog.TagSystem, logevent.EventWinConnectSwitch,
+				logevent.Str(logevent.AttrFrom, serverURL),
+				logevent.Str(logevent.AttrTo, p.ControlAddr))
 			a := core.NewAuthenticator(preferred, savedKey.APIKey, savedKey.Username, savedKey.Password)
 			a.SetDeviceInfo(savedKey.KeyID, deviceID, "Windows PC")
 			a.SetKeyAuth(savedKey)
 			a.AdoptToken(dialer.Token())
-			core.Log.Printf("connect: switched to %s (token migrated)", p.ControlAddr)
 			if td, tdErr := router.NewControlDialer(p.ControlAddr, a); tdErr == nil {
 				dialer = wireDialer(td)
 			} else {
@@ -1184,7 +1718,9 @@ func main() {
 				seeds = append(seeds, r.Addr)
 			}
 			dhtNode.Bootstrap(seeds)
-			core.Log.Printf("dht: bootstrapped with %d control(s) + %d relay(s)", len(ctrlAddrs), len(fetchedRelays))
+			logevent.Emit(binlog.TagSystem, logevent.EventWinDhtBootstrap,
+				logevent.Int(logevent.AttrCtrlCount, int64(len(ctrlAddrs))),
+				logevent.Int(logevent.AttrRelayCount, int64(len(fetchedRelays))))
 
 			// Announce this node as a relay so other clients can discover it.
 			// Probe the external UDP endpoint via the reflector, then sign and publish.
@@ -1200,17 +1736,25 @@ func main() {
 						}
 						ep, err := core.ProbeExternalEndpoint(ctrlAddr, "")
 						if err != nil {
-							core.Log.Printf("dht: probe external endpoint via %s: %v", ctrlAddr, err)
+							logevent.Emit(binlog.TagSystem, logevent.EventWinDhtAnnounce,
+								logevent.Str(logevent.AttrStage, "probe_failed"),
+								logevent.Str(logevent.AttrCtrl, ctrlAddr),
+								logevent.Str(logevent.AttrErr, err.Error()))
 							continue
 						}
 						cc := lastKnownCountry
 						entry, err := core.BuildSignedRelayEntry(nodeID, ep.String(), cc)
 						if err != nil {
-							core.Log.Printf("dht: sign relay entry: %v", err)
+							logevent.Emit(binlog.TagSystem, logevent.EventWinDhtAnnounce,
+								logevent.Str(logevent.AttrStage, "sign_failed"),
+								logevent.Str(logevent.AttrErr, err.Error()))
 							return
 						}
 						dhtNode.SetOwnEntry(entry)
-						core.Log.Printf("dht: own relay entry set addr=%s cc=%s", ep, cc)
+						logevent.Emit(binlog.TagSystem, logevent.EventWinDhtAnnounce,
+							logevent.Str(logevent.AttrStage, "entry_set"),
+							logevent.Str(logevent.AttrAddr, ep.String()),
+							logevent.Str(logevent.AttrCc, cc))
 						// Register a refresher so each subsequent announce uses a fresh TS+sig.
 						// Captures ep and cc from the probe; re-probing on every tick is not
 						// needed because the NAT mapping is kept alive by the announce packets.
@@ -1220,7 +1764,7 @@ func main() {
 						})
 						return
 					}
-					core.Log.Printf("dht: all endpoint probes failed, retrying in 30s")
+					logevent.Emit(binlog.TagSystem, logevent.EventWinDhtAnnounce, logevent.Str(logevent.AttrStage, "all_probes_failed"))
 					select {
 					case <-announceStop:
 						return
@@ -1228,6 +1772,64 @@ func main() {
 					}
 				}
 			}()
+
+			// Per-relay-addr exponential backoff: prevents goroutine storms when a
+			// relay is unreachable (no UDP path). Starts at 30s (one ticker cycle),
+			// doubles each failure, caps at 5 min. State is reset on success.
+			// Ports the fix already shipped on Android/iOS (main_linux.go,
+			// lib_ios.go) and mac (main_darwin.go) -- windows never had it either
+			// (same gap mac had, just hidden behind logevent.Emit instead of a
+			// grep-able Log.Printf string). Confirmed live 2026-08-20/21 on mac: a
+			// client with ~120 known relay peers re-punched the entire set every
+			// 30s tick forever with no memory of recent failures, generating
+			// 800K+ hole-punch log lines in an hour and correlating with real
+			// tunnel throughput crashing to near-zero for several-minute
+			// stretches while the storm contended with real traffic for local
+			// CPU/network.
+			type relayPunchState struct {
+				failedAt time.Time
+				failures int
+			}
+			var (
+				relayPunchMu     sync.Mutex
+				relayPunchStates = map[string]*relayPunchState{}
+			)
+			relayBackoffExpired := func(addr string) bool {
+				relayPunchMu.Lock()
+				defer relayPunchMu.Unlock()
+				ps := relayPunchStates[addr]
+				if ps == nil {
+					return true
+				}
+				const maxBackoff = 5 * time.Minute
+				backoff := 30 * time.Second
+				for i := 0; i < ps.failures; i++ {
+					backoff *= 2
+					if backoff >= maxBackoff {
+						backoff = maxBackoff
+						break
+					}
+				}
+				return time.Since(ps.failedAt) >= backoff
+			}
+			relayPunchFailed := func(addr string) {
+				relayPunchMu.Lock()
+				defer relayPunchMu.Unlock()
+				ps := relayPunchStates[addr]
+				if ps == nil {
+					ps = &relayPunchState{}
+					relayPunchStates[addr] = ps
+				}
+				ps.failedAt = time.Now()
+				if ps.failures < 8 { // cap at 2^8 shifts; maxBackoff clamps the actual wait
+					ps.failures++
+				}
+			}
+			relayPunchSucceeded := func(addr string) {
+				relayPunchMu.Lock()
+				defer relayPunchMu.Unlock()
+				delete(relayPunchStates, addr)
+			}
 
 			// Merge DHT-discovered relays into router and initiate hole punches
 			// for blocked controls.  Runs every 30 s â€” fast enough to react to
@@ -1269,20 +1871,34 @@ func main() {
 							if entry.NodeID == nodeID || entry.Addr == ownEntry.Addr {
 								continue // don't relay through ourselves
 							}
+							if !relayBackoffExpired(entry.Addr) {
+								continue // recently failed; wait for backoff to expire
+							}
 							for _, ctrl := range blockedCtrls {
-								core.Log.Printf("relay-client: punching %s for ctrl=%s", entry.Addr, ctrl)
+								logevent.Emit(binlog.TagSystem, logevent.EventWinRelayClient,
+									logevent.Str(logevent.AttrStage, "punching"),
+									logevent.Str(logevent.AttrRelayAddr, entry.Addr),
+									logevent.Str(logevent.AttrCtrl, ctrl))
 								go func(relayAddr, ctrlURL, ownAddr string) {
 									// Send HolePunch invitation to relay via DHT socket.
 									dhtNode.SendHolePunch(relayAddr, ownAddr, ctrlURL)
 									// Punch from our side simultaneously.
 									conn, err := core.Punch("", relayAddr)
 									if err != nil {
-										core.Log.Printf("relay-client: punch %s failed: %v", relayAddr, err)
+										logevent.Emit(binlog.TagSystem, logevent.EventWinRelayClient,
+											logevent.Str(logevent.AttrStage, "punch_failed"),
+											logevent.Str(logevent.AttrRelayAddr, relayAddr),
+											logevent.Str(logevent.AttrErr, err.Error()))
+										relayPunchFailed(relayAddr)
 										return
 									}
 									rc := core.NewUDPRelayConn(conn, "")
 									router.RegisterUDPPeer(entry.NodeID, rc)
-									core.Log.Printf("relay-client: relay established %s â†’ %s", relayAddr, ctrlURL)
+									relayPunchSucceeded(relayAddr)
+									logevent.Emit(binlog.TagSystem, logevent.EventWinRelayClient,
+										logevent.Str(logevent.AttrStage, "established"),
+										logevent.Str(logevent.AttrRelayAddr, relayAddr),
+										logevent.Str(logevent.AttrCtrl, ctrlURL))
 									router.BuildPaths()
 								}(entry.Addr, ctrl, ownEntry.Addr)
 								break // one control per relay is enough to establish the path
@@ -1306,9 +1922,13 @@ func main() {
 		var myIPErr error
 		publicIP, myIPErr = core.FetchMyIP(relayAPIURL)
 		if myIPErr != nil {
-			core.Log.Printf("myip: fetch failed: %v", myIPErr)
+			logevent.Emit(binlog.TagSystem, logevent.EventWinMyip,
+				logevent.Str(logevent.AttrResult, "error"),
+				logevent.Str(logevent.AttrErr, myIPErr.Error()))
 		} else {
-			core.Log.Printf("myip: %s", publicIP)
+			logevent.Emit(binlog.TagSystem, logevent.EventWinMyip,
+				logevent.Str(logevent.AttrResult, "ok"),
+				logevent.Str(logevent.AttrValue, publicIP))
 			dialer.SetClientIP(publicIP) // primary dialer created before FetchMyIP; stamp it now
 		}
 		{
@@ -1335,7 +1955,7 @@ func main() {
 					}
 				}
 			} else {
-				core.Log.Printf("connect: bypass init failed (%v)  -  skipping country pre-detection", err)
+				logevent.Emit(binlog.TagSystem, logevent.EventWinBypassInit, logevent.Str(logevent.AttrErr, err.Error()))
 			}
 			if bypassMgr != nil {
 				// Skip CIDR-based country detection when GPS already answered or the
@@ -1344,18 +1964,27 @@ func main() {
 				skipCIDR := gpsDetected || settings.PreferredRegion != ""
 				discoveredMu.RUnlock()
 				if skipCIDR {
-					core.Log.Printf("connect: skipping CIDR country pre-detection (gpsDetected=%v preferredRegion=%q)", gpsDetected, settings.PreferredRegion)
+					logevent.Emit(binlog.TagSystem, logevent.EventWinCountryPredetect,
+						logevent.Str(logevent.AttrStage, "skipped"),
+						logevent.Bool(logevent.AttrGpsDetected, gpsDetected),
+						logevent.Str(logevent.AttrRegion, settings.PreferredRegion))
 				} else {
-					core.Log.Printf("connect: waiting for country detection (up to 5 s)...")
+					logevent.Emit(binlog.TagSystem, logevent.EventWinCountryPredetect, logevent.Str(logevent.AttrStage, "waiting"))
 					cc := waitForCountry(bypassMgr, 5*time.Second)
 					if cc != "" {
 						discoveredMu.Lock()
 						lastKnownCountry = cc
 						discoveredMu.Unlock()
 						saveCountry(appDataDir, cc)
-						core.Log.Printf("connect: pre-detected country=%q", cc)
+						logevent.Emit(binlog.TagSystem, logevent.EventWinCountryPredetect,
+							logevent.Str(logevent.AttrStage, "detected"),
+							logevent.Str(logevent.AttrCc, cc))
 						if best := pickServerURL(savedKey); best != "" && best != serverURL {
-							core.Log.Printf("connect: switching control %s  ->  %s (country=%s)", serverURL, best, cc)
+							logevent.Emit(binlog.TagSystem, logevent.EventWinCountryPredetect,
+								logevent.Str(logevent.AttrStage, "switching"),
+								logevent.Str(logevent.AttrFrom, serverURL),
+								logevent.Str(logevent.AttrTo, best),
+								logevent.Str(logevent.AttrCc, cc))
 							a := core.NewAuthenticator(best, savedKey.APIKey, savedKey.Username, savedKey.Password)
 							a.SetDeviceInfo(savedKey.KeyID, deviceID, "Windows PC")
 							a.SetKeyAuth(savedKey)
@@ -1384,13 +2013,14 @@ func main() {
 							}
 						}
 					} else {
-						core.Log.Printf("connect: country detection timed out  -  proceeding with %s", serverURL)
+						logevent.Emit(binlog.TagSystem, logevent.EventWinCountryPredetect,
+							logevent.Str(logevent.AttrStage, "timed_out"),
+							logevent.Str(logevent.AttrTo, serverURL))
 					}
 				}
 			}
 		}
 
-		core.Log.Printf("connect: picking path")
 		effectiveURL := serverURL
 		routingViaRelay := false
 		path := router.Primary()
@@ -1398,7 +2028,10 @@ func main() {
 			relay := path.Relays[0]
 			if path.UDPRelay != nil {
 				// UDP hole-punched relay: bypass HTTP, route via peer UDP socket.
-				core.Log.Printf("connect: routing via UDP relay score=%.0f peer=%s", path.Score, relay.Addr)
+				logevent.Emit(binlog.TagSystem, logevent.EventWinPathPick,
+					logevent.Str(logevent.AttrStage, "udp_relay"),
+					logevent.Str(logevent.AttrScore, fmt.Sprintf("%.0f", path.Score)),
+					logevent.Str(logevent.AttrAddr, relay.Addr))
 				dialer = core.NewUDPRelayDialer(path.UDPRelay, dialer.Auth())
 			} else {
 				// TCP relay: keep serverURL as the control URL so the pool tracks
@@ -1414,10 +2047,13 @@ func main() {
 				dialer.SetDialFunc(relayDialFn)
 				effectiveURL = ensureHTTPS(relay.Addr) // bypass route must cover relay IP
 				routingViaRelay = true
-				core.Log.Printf("connect: routing via relay score=%.0f addr=%s", path.Score, relay.Addr)
+				logevent.Emit(binlog.TagSystem, logevent.EventWinPathPick,
+					logevent.Str(logevent.AttrStage, "tcp_relay"),
+					logevent.Str(logevent.AttrScore, fmt.Sprintf("%.0f", path.Score)),
+					logevent.Str(logevent.AttrAddr, relay.Addr))
 			}
 		} else {
-			core.Log.Printf("connect: no relay path selected  -  routing direct to control")
+			logevent.Emit(binlog.TagSystem, logevent.EventWinPathPick, logevent.Str(logevent.AttrStage, "none"))
 		}
 
 		// If routing direct (no relay) and the router detected TCP is blocked on the
@@ -1437,9 +2073,13 @@ func main() {
 				}
 				discoveredMu.RUnlock()
 				if hasTCPControl {
-					core.Log.Printf("connect: primary control %s TCP blocked but TCP-capable controls exist â€” skipping UDP upgrade", ctrlAddr)
+					logevent.Emit(binlog.TagSystem, logevent.EventWinUdpUpgrade,
+						logevent.Str(logevent.AttrStage, "skipped_tcp_available"),
+						logevent.Str(logevent.AttrCtrl, ctrlAddr))
 				} else if td, tdErr := router.NewControlDialer(ctrlAddr, dialer.Auth()); tdErr == nil {
-					core.Log.Printf("connect: primary control %s TCP blocked (no TCP alternatives) â€” upgrading to UDP", ctrlAddr)
+					logevent.Emit(binlog.TagSystem, logevent.EventWinUdpUpgrade,
+						logevent.Str(logevent.AttrStage, "upgraded"),
+						logevent.Str(logevent.AttrCtrl, ctrlAddr))
 					dialer = wireDialer(td)
 				}
 			}
@@ -1463,7 +2103,7 @@ func main() {
 					var rtt time.Duration
 					var ok bool
 					if router.ControlTransportName(addr) == "udp" {
-						rtt, ok = core.ProbeControlUDP(addr, 4*time.Second)
+						rtt, ok = core.ProbeControlQUIC(addr, 4*time.Second)
 					} else {
 						rtt, ok = core.ProbeControlE2E(addr, 4*time.Second)
 					}
@@ -1477,7 +2117,7 @@ func main() {
 					router.UpdateControlRTT(res.addr, res.rtt)
 					viable = append(viable, res.addr)
 				} else {
-					core.Log.Printf("connect: pool: e2e probe failed %s  -  exits unreachable", res.addr)
+					logevent.Emit(binlog.TagSystem, logevent.EventWinPoolProbeFailed, logevent.Str(logevent.AttrAddr, res.addr))
 				}
 			}
 			sort.Slice(viable, func(i, j int) bool {
@@ -1497,13 +2137,12 @@ func main() {
 				}
 				return ri < rj
 			})
-			// Cap at 12: enough headroom to spread load across every qualifying
-			// control instead of concentrating it on whichever 2-5 happen to
-			// have the best RTT at rebuild time (see snc/core/router.go's
-			// matching minPoolControls/maxPoolControls bounds).
-			if len(viable) > 12 {
-				viable = viable[:12]
-			}
+			// Cap at 12, guaranteeing real TCP/QUIC diversity in the pool
+			// instead of a plain RTT-sort cap -- see BalanceByTransport's doc
+			// comment for why a pure RTT sort can silently fill the whole
+			// pool with one transport and leave no redundancy when it
+			// degrades.
+			viable = router.BalanceByTransport(viable, 12)
 			return viable
 		}
 
@@ -1541,7 +2180,10 @@ func main() {
 				return viable
 			}
 			need := 5 - len(viable)
-			core.Log.Printf("connect: pool: topping up  -  need %d more, probing %d out-of-country candidate(s)", need, len(fallback))
+			logevent.Emit(binlog.TagSystem, logevent.EventWinPoolBuild,
+				logevent.Str(logevent.AttrStage, "topup_needed"),
+				logevent.Int(logevent.AttrNeed, int64(need)),
+				logevent.Int(logevent.AttrCount, int64(len(fallback))))
 			extra := buildViableAddrs(fallback)
 			// Deprioritize RU/CN: sort them after all other regions, preserving RTT
 			// order within each group. buildViableAddrs already sorted by RTT, so
@@ -1561,7 +2203,10 @@ func main() {
 				extra = extra[:need]
 			}
 			if len(extra) > 0 {
-				core.Log.Printf("connect: pool: added %d out-of-country control(s), total viable=%d", len(extra), len(viable)+len(extra))
+				logevent.Emit(binlog.TagSystem, logevent.EventWinPoolBuild,
+					logevent.Str(logevent.AttrStage, "topup_added"),
+					logevent.Int(logevent.AttrCount, int64(len(extra))),
+					logevent.Int(logevent.AttrTotal, int64(len(viable)+len(extra))))
 			}
 			return append(viable, extra...)
 		}
@@ -1584,30 +2229,44 @@ func main() {
 					a.SetDeviceInfo(savedKey.KeyID, deviceID, "Windows PC")
 					a.SetKeyAuth(savedKey)
 					if err := a.Login(); err != nil {
-						core.Log.Printf("connect: pool: auth to %s failed (%v)  -  skipping", addr, err)
+						logevent.Emit(binlog.TagSystem, logevent.EventWinPoolBuild,
+							logevent.Str(logevent.AttrStage, "auth_failed"),
+							logevent.Str(logevent.AttrAddr, addr),
+							logevent.Str(logevent.AttrErr, err.Error()))
 						continue
 					}
 					var err error
 					td, err = router.NewControlDialer(addr, a)
 					if err != nil {
-						core.Log.Printf("connect: pool: dialer for %s failed (%v)  -  skipping", addr, err)
+						logevent.Emit(binlog.TagSystem, logevent.EventWinPoolBuild,
+							logevent.Str(logevent.AttrStage, "dialer_failed"),
+							logevent.Str(logevent.AttrAddr, addr),
+							logevent.Str(logevent.AttrErr, err.Error()))
 						continue
 					}
 					wireDialer(td)
-					core.Log.Printf("connect: pool: added control %s", addr)
+					logevent.Emit(binlog.TagSystem, logevent.EventWinPoolBuild,
+						logevent.Str(logevent.AttrStage, "control_added"),
+						logevent.Str(logevent.AttrAddr, addr))
 				}
 				poolDialers = append(poolDialers, td)
 			}
 			if len(poolDialers) == 0 {
 				poolDialers = []*core.TunnelDialer{dialer} // fallback: primary only
 			}
-			core.Log.Printf("connect: dialer pool size=%d", len(poolDialers))
+			logevent.Emit(binlog.TagSystem, logevent.EventWinPoolBuild,
+				logevent.Str(logevent.AttrStage, "pool_size"),
+				logevent.Int(logevent.AttrCount, int64(len(poolDialers))))
 			return poolDialers
 		}
-		core.Log.Printf("connect: building dialer pool viable=%d", len(initialViable))
+		logevent.Emit(binlog.TagSystem, logevent.EventWinPoolBuild,
+			logevent.Str(logevent.AttrStage, "building"),
+			logevent.Int(logevent.AttrCount, int64(len(initialViable))))
 		initialPoolDialers := buildDialerSlice(initialViable)
 		dialerPool = core.NewDialerPool(initialPoolDialers)
-		core.Log.Printf("connect: dialer pool ready size=%d", dialerPool.Size())
+		logevent.Emit(binlog.TagSystem, logevent.EventWinPoolBuild,
+			logevent.Str(logevent.AttrStage, "pool_ready"),
+			logevent.Int(logevent.AttrCount, int64(dialerPool.Size())))
 
 		// Widen manifest-fetch candidates beyond the last-cached (≤12-node)
 		// manifest with whatever's in the active dialer pool right now, and
@@ -1643,20 +2302,23 @@ func main() {
 						}
 						return dialerPool.Pick()
 					},
+					func() bool {
+						return trayApp != nil && trayApp.IsWildcatEnabled()
+					},
 				)
 			}
 		})
 
 		// Warning: first re-auth failure  ->  orange icon so user sees something is wrong.
 		dialer.SetReAuthWarningHook(func() {
-			core.Log.Printf("tunnel: re-auth failing  -  showing warning")
+			logevent.Emit(binlog.TagSystem, logevent.EventWinTunnelReauth, logevent.Str(logevent.AttrStage, "warning"))
 			if trayApp != nil {
 				trayApp.SetAuthWarning("auth server unavailable, retrying...")
 			}
 		})
 		// Recovery: re-auth succeeded after a warning  ->  restore green icon.
 		dialer.SetReAuthRecoveredHook(func() {
-			core.Log.Printf("tunnel: re-auth recovered  -  clearing warning")
+			logevent.Emit(binlog.TagSystem, logevent.EventWinTunnelReauth, logevent.Str(logevent.AttrStage, "recovered"))
 			if trayApp != nil {
 				trayApp.ClearAuthWarning()
 			}
@@ -1665,15 +2327,17 @@ func main() {
 		// Auth rejection (server refuses credentials)  ->  login error state, user must re-enter key.
 		// Server unavailable (network/arbiter down)  ->  auto-reconnect and keep trying.
 		dialer.SetFatalErrorHook(func(err error) {
-			core.Log.Printf("tunnel: fatal re-auth failure (%v)", err)
+			logevent.Emit(binlog.TagSystem, logevent.EventWinTunnelReauth,
+				logevent.Str(logevent.AttrStage, "fatal"),
+				logevent.Str(logevent.AttrErr, err.Error()))
 			if trayApp == nil {
 				return
 			}
 			if strings.Contains(err.Error(), "server unavailable") {
-				core.Log.Printf("tunnel: server unavailable  -  triggering reconnect")
+				logevent.Emit(binlog.TagSystem, logevent.EventWinTunnelReauth, logevent.Str(logevent.AttrStage, "server_unavailable_reconnect"))
 				trayApp.TriggerReconnect()
 			} else {
-				core.Log.Printf("tunnel: credentials rejected  -  entering login error state")
+				logevent.Emit(binlog.TagSystem, logevent.EventWinTunnelReauth, logevent.Str(logevent.AttrStage, "credentials_rejected"))
 				trayApp.ShowLoginError()
 			}
 		})
@@ -1702,7 +2366,9 @@ func main() {
 					return
 				}
 				if pool.Size() > 1 {
-					core.Log.Printf("tunnel: first stream failure on %s  -  instant eviction, switching to standby", ctrlURL)
+					logevent.Emit(binlog.TagSystem, logevent.EventWinTunnelEvict,
+						logevent.Str(logevent.AttrReason, "first_fail"),
+						logevent.Str(logevent.AttrCtrl, ctrlURL))
 					pool.Evict(td)
 					router.RecordControlFlap(hostNameOf(ctrlURL) + ":443")
 					startSilentRefresh()
@@ -1714,12 +2380,16 @@ func main() {
 					return
 				}
 				addr := hostNameOf(ctrlURL) + ":443"
-				core.Log.Printf("tunnel: data-plane failure on %s  -  marking data-dead, evicting", ctrlURL)
+				logevent.Emit(binlog.TagSystem, logevent.EventWinTunnelEvict,
+					logevent.Str(logevent.AttrReason, "data_fail"),
+					logevent.Str(logevent.AttrCtrl, ctrlURL))
 				core.SetTunnelHealthy(false)
 				router.MarkControlDataDead(addr, time.Now().Add(1*time.Minute))
 				pool.Evict(td)
 				if pool.Size() == 0 {
-					core.Log.Printf("tunnel: pool empty after data-fail  -  triggering full reconnect")
+					logevent.Emit(binlog.TagSystem, logevent.EventWinTunnelEvict,
+						logevent.Str(logevent.AttrReason, "pool_empty"),
+						logevent.Str(logevent.AttrCtrl, ctrlURL))
 					if trayApp != nil {
 						trayApp.TriggerReconnect()
 					}
@@ -1739,13 +2409,17 @@ func main() {
 					return
 				}
 				addr := hostNameOf(ctrlURL) + ":443"
-				core.Log.Printf("tunnel: UDP relay failed on %s  -  downgrading to TCP, starting silent refresh", ctrlURL)
+				logevent.Emit(binlog.TagSystem, logevent.EventWinTunnelEvict,
+					logevent.Str(logevent.AttrReason, "udp_fail"),
+					logevent.Str(logevent.AttrCtrl, ctrlURL))
 				core.SetTunnelHealthy(false)
 				router.MarkUDPDataFailed(addr)
 				if pool.Size() > 1 {
 					pool.Evict(td)
 				} else {
-					core.Log.Printf("tunnel: last dialer  -  not evicting, waiting for silent refresh")
+					logevent.Emit(binlog.TagSystem, logevent.EventWinTunnelEvict,
+						logevent.Str(logevent.AttrReason, "last_dialer"),
+						logevent.Str(logevent.AttrCtrl, ctrlURL))
 				}
 				startSilentRefresh()
 			})
@@ -1769,7 +2443,9 @@ func main() {
 				if pool == nil {
 					return
 				}
-				core.Log.Printf("tunnel: repeated login failures on %s  -  evicting, switching to standby", ctrlURL)
+				logevent.Emit(binlog.TagSystem, logevent.EventWinTunnelEvict,
+					logevent.Str(logevent.AttrReason, "auth_fail"),
+					logevent.Str(logevent.AttrCtrl, ctrlURL))
 				router.RecordControlFlap(hostNameOf(ctrlURL) + ":443")
 				if pool.Size() > 1 {
 					pool.Evict(td)
@@ -1792,7 +2468,7 @@ func main() {
 				deadline := time.Now().Add(2 * time.Minute)
 				retryDelay := 5 * time.Second
 
-				core.Log.Printf("tunnel: silent path refresh started (2 min deadline)")
+				logevent.Emit(binlog.TagSystem, logevent.EventWinTunnelSilentRefresh, logevent.Str(logevent.AttrStage, "started"))
 
 				for time.Now().Before(deadline) {
 					// Probe controls and rebuild.
@@ -1811,7 +2487,10 @@ func main() {
 						if err := a.Login(); err == nil {
 							td, err := router.NewControlDialer(addr, a)
 							if err != nil {
-								core.Log.Printf("connect: silent refresh: dialer for %s failed (%v)", addr, err)
+								logevent.Emit(binlog.TagSystem, logevent.EventWinTunnelSilentRefresh,
+									logevent.Str(logevent.AttrStage, "dialer_failed"),
+									logevent.Str(logevent.AttrAddr, addr),
+									logevent.Str(logevent.AttrErr, err.Error()))
 								continue
 							}
 							wired := wireDialer(td)
@@ -1824,12 +2503,16 @@ func main() {
 
 					if len(freshDialers) > 0 {
 						dialerPool.Swap(freshDialers)
-						core.Log.Printf("tunnel: silent path refresh succeeded  -  pool=%d", len(freshDialers))
+						logevent.Emit(binlog.TagSystem, logevent.EventWinTunnelSilentRefresh,
+							logevent.Str(logevent.AttrStage, "succeeded"),
+							logevent.Int(logevent.AttrPoolSize, int64(len(freshDialers))))
 						core.SetTunnelHealthy(true)
 						return
 					}
 
-					core.Log.Printf("tunnel: silent refresh attempt failed  -  retry in %v", retryDelay)
+					logevent.Emit(binlog.TagSystem, logevent.EventWinTunnelSilentRefresh,
+						logevent.Str(logevent.AttrStage, "attempt_failed"),
+						logevent.Int(logevent.AttrRetryDelayMs, retryDelay.Milliseconds()))
 					select {
 					case <-capturedStop:
 						return // disconnect was requested  -  stop quietly
@@ -1841,14 +2524,14 @@ func main() {
 				}
 
 				// 2 minutes exhausted  -  fall back to full reconnect.
-				core.Log.Printf("tunnel: silent refresh timed out  -  triggering full reconnect")
+				logevent.Emit(binlog.TagSystem, logevent.EventWinTunnelSilentRefresh, logevent.Str(logevent.AttrStage, "timed_out"))
 				if trayApp != nil {
 					trayApp.TriggerReconnect()
 				}
 			}()
 		}
 
-		core.Log.Printf("connect: attaching fail hooks")
+		logevent.Emit(binlog.TagSystem, logevent.EventWinPoolBuild, logevent.Str(logevent.AttrStage, "hooks_attached"))
 		// Attach fail hooks to every pool dialer.
 		for _, td := range initialPoolDialers {
 			attachDataFailHook(td)
@@ -1856,34 +2539,42 @@ func main() {
 			attachAuthFailHook(td)
 		}
 
-		core.Log.Printf("connect: starting SOCKS5")
+		logevent.Emit(binlog.TagSystem, logevent.EventWinSocks5TunSetup, logevent.Str(logevent.AttrStage, "socks5_starting"))
 		ln, err := net.Listen("tcp", "127.0.0.1:0")
 		if err != nil {
 			return fmt.Errorf("SOCKS5 listen: %w", err)
 		}
 		socksLn = ln
-		core.Log.Printf("SOCKS5 listening on %s", ln.Addr())
+		logevent.Emit(binlog.TagSystem, logevent.EventWinSocks5TunSetup,
+			logevent.Str(logevent.AttrStage, "socks5_listening"),
+			logevent.Str(logevent.AttrAddr, ln.Addr().String()))
 
-		core.Log.Printf("connect: starting TUN")
+		logevent.Emit(binlog.TagSystem, logevent.EventWinSocks5TunSetup, logevent.Str(logevent.AttrStage, "tun_starting"))
 		tun = core.NewTUNBridge(ln.Addr().String())
 		if err := tun.Start(); err != nil {
-			core.Log.Printf("ERROR: TUN start: %v", err)
+			logevent.Emit(binlog.TagSystem, logevent.EventWinSocks5TunSetup,
+				logevent.Str(logevent.AttrStage, "tun_failed"),
+				logevent.Str(logevent.AttrErr, err.Error()))
 			socksLn.Close()
 			socksLn = nil
 			return fmt.Errorf("TUN: %w", err)
 		}
 
-		core.Log.Printf("connect: applying routes effectiveURL=%s", effectiveURL)
+		logevent.Emit(binlog.TagSystem, logevent.EventWinSocks5TunSetup,
+			logevent.Str(logevent.AttrStage, "routes_applying"),
+			logevent.Str(logevent.AttrAddr, effectiveURL))
 		routes = snwin.NewRouteManager()
 		if err := routes.Apply(hostOf(effectiveURL), core.TUNAddr); err != nil {
-			core.Log.Printf("ERROR: routes: %v", err)
+			logevent.Emit(binlog.TagSystem, logevent.EventWinSocks5TunSetup,
+				logevent.Str(logevent.AttrStage, "routes_failed"),
+				logevent.Str(logevent.AttrErr, err.Error()))
 			tun.Stop()
 			tun = nil
 			socksLn.Close()
 			socksLn = nil
 			return fmt.Errorf("routing: %w", err)
 		}
-		core.Log.Println("connected: TUN up, routes applied")
+		logevent.Emit(binlog.TagSystem, logevent.EventWinSocks5TunSetup, logevent.Str(logevent.AttrStage, "connected"))
 
 		// Point the TUN adapter's own DNS at 1.1.1.1 unconditionally, before
 		// the DoH branch below. Without this the adapter has no DNS server of
@@ -1892,7 +2583,9 @@ func main() {
 		// (see EnsureTunnelDNS's doc comment). ConfigureDoH/ConfigureDoHFallback
 		// build on top of this when DoH is enabled.
 		if err := snwin.EnsureTunnelDNS(); err != nil {
-			core.Log.Printf("warn: point TUN DNS at 1.1.1.1: %v", err)
+			logevent.Emit(binlog.TagSystem, logevent.EventWinSocks5TunSetup,
+				logevent.Str(logevent.AttrStage, "dns_pin_failed"),
+				logevent.Str(logevent.AttrErr, err.Error()))
 		}
 
 		// Add bypass routes for all known control IPs beyond effectiveURL.
@@ -1914,7 +2607,9 @@ func main() {
 			MainPID:       os.Getpid(),
 			TunnelHealthy: true,
 		}); err != nil {
-			core.Log.Printf("warn: write watchdog state (connected): %v", err)
+			logevent.Emit(binlog.TagSystem, logevent.EventWinSocks5TunSetup,
+				logevent.Str(logevent.AttrStage, "watchdog_write_failed"),
+				logevent.Str(logevent.AttrErr, err.Error()))
 		}
 
 		// Decoy traffic: fire background HTTPS GETs that bypass the TUN
@@ -1929,11 +2624,19 @@ func main() {
 		// domestic CDN IPs (e.g. Meta  ->  Selectel/MTS) in DNS responses.
 		if trayApp == nil || trayApp.IsDNSOverHTTPSEnabled() {
 			go func() {
-				core.Log.Printf("connect: configuring DoH")
+				logevent.Emit(binlog.TagSystem, logevent.EventWinDoh,
+					logevent.Str(logevent.AttrTrigger, "connect"),
+					logevent.Str(logevent.AttrStage, "configuring"))
 				if err := snwin.ConfigureDoH(); err != nil {
-					core.Log.Printf("warn: netsh DoH unavailable (%v)  -  starting local DoH proxy", err)
+					logevent.Emit(binlog.TagSystem, logevent.EventWinDoh,
+						logevent.Str(logevent.AttrTrigger, "connect"),
+						logevent.Str(logevent.AttrStage, "netsh_unavailable"),
+						logevent.Str(logevent.AttrErr, err.Error()))
 					if p, perr := snwin.ConfigureDoHFallback(); perr != nil {
-						core.Log.Printf("warn: DoH proxy failed: %v  -  DNS stays plain-UDP, still tunneled", perr)
+						logevent.Emit(binlog.TagSystem, logevent.EventWinDoh,
+							logevent.Str(logevent.AttrTrigger, "connect"),
+							logevent.Str(logevent.AttrStage, "proxy_failed"),
+							logevent.Str(logevent.AttrErr, perr.Error()))
 					} else {
 						dohMu.Lock()
 						dohProxy = p
@@ -1954,7 +2657,7 @@ func main() {
 			bypassMgr.SetLocalIP(routes.LocalAddr())
 			bypassMgr.SetToken(dialer.Token())
 		}
-		core.Log.Printf("connect: starting SOCKS5 server")
+		logevent.Emit(binlog.TagSystem, logevent.EventWinConnectFinalize, logevent.Str(logevent.AttrStage, "starting_server"))
 		socks5 = core.NewSOCKS5ServerWithPool("", dialerPool, bypassMgr)
 		// Use the user's explicit toggle; fall back to CC-based default if no choice saved yet.
 		if trayApp != nil {
@@ -1964,24 +2667,24 @@ func main() {
 			socks5.BlockQUIC = cc == "RU" || cc == "CN"
 		}
 		if socks5.BlockQUIC {
-			core.Log.Printf("connect: QUIC (UDP:443) blocked (blockQUIC=%v)", socks5.BlockQUIC)
+			logevent.Emit(binlog.TagSystem, logevent.EventWinConnectFinalize, logevent.Str(logevent.AttrStage, "quic_blocked"))
 		}
 		// Trial (2026-08-13, rolled out to all desktop clients 2026-08-12):
-		// dedicated native-UDP dialer for general (non-DNS) UDP ASSOCIATE
-		// traffic -- voice/video call media, games, anything not otherwise
-		// DNS or bypassed. See the full rationale in socks5.RealtimeUDPDialer's
-		// doc comment (snc/core/socks5.go) and dialerFor's use of it
+		// dedicated direct-to-control dialer for general (non-DNS) UDP
+		// ASSOCIATE traffic -- voice/video call media, games, anything not
+		// otherwise DNS or bypassed. Backed by QUIC (see NewQUICRelayDialer,
+		// snc/core/quic_relay.go) rather than the old raw-SNCU native UDP
+		// path. See the full rationale in socks5.RealtimeUDPDialer's doc
+		// comment (snc/core/socks5.go) and dialerFor's use of it
 		// (snc/core/udp_assoc.go). Best-effort -- normal pool-based UDP relay
 		// (today's behavior) is exactly what happens if this fails, nothing
 		// blocks on it.
-		if udpConn, uerr := core.NewUDPControlConn(strings.TrimPrefix(effectiveURL, "https://")); uerr == nil {
-			socks5.RealtimeUDPDialer = core.NewUDPRelayDialer(udpConn, dialer.Auth())
-			core.Log.Printf("connect: realtime UDP trial dialer ready via %s", effectiveURL)
-		} else {
-			core.Log.Printf("connect: realtime UDP trial dialer unavailable (%v) -- falling back to pool", uerr)
-		}
+		socks5.RealtimeUDPDialer = core.NewQUICRelayDialer(strings.TrimPrefix(effectiveURL, "https://"), dialer.Auth())
+		logevent.Emit(binlog.TagSystem, logevent.EventWinConnectFinalize,
+			logevent.Str(logevent.AttrStage, "realtime_udp_ready"),
+			logevent.Str(logevent.AttrAddr, effectiveURL))
 		go socks5.Serve(core.WrapWithTorrentFilter(socksLn)) //nolint:errcheck
-		core.Log.Printf("connect: SOCKS5 server started")
+		logevent.Emit(binlog.TagSystem, logevent.EventWinConnectFinalize, logevent.Str(logevent.AttrStage, "server_started"))
 
 		// Pool management: RTT-based promotion + drain completion every 10 s.
 		// Replaces the old disruptive 60 s wholesale rebuild  -  working dialers
@@ -2010,8 +2713,10 @@ func main() {
 				if !dialerPool.NeedsRefill(target) {
 					continue
 				}
-				core.Log.Printf("connect: pool below target (%d/%d)  -  refilling",
-					dialerPool.Size(), target)
+				logevent.Emit(binlog.TagSystem, logevent.EventWinPoolRefill,
+					logevent.Str(logevent.AttrStage, "below_target"),
+					logevent.Int(logevent.AttrSize, int64(dialerPool.Size())),
+					logevent.Int(logevent.AttrTarget, int64(target)))
 				// Re-probe to get a fresh picture before adding new dialers.
 				router.ProbeDataPlane(5 * time.Second)
 				router.BuildPaths()
@@ -2024,12 +2729,18 @@ func main() {
 					a.SetDeviceInfo(savedKey.KeyID, deviceID, "Windows PC")
 					a.SetKeyAuth(savedKey)
 					if err := a.Login(); err != nil {
-						core.Log.Printf("connect: refill: auth to %s failed: %v", addr, err)
+						logevent.Emit(binlog.TagSystem, logevent.EventWinPoolRefill,
+							logevent.Str(logevent.AttrStage, "auth_failed"),
+							logevent.Str(logevent.AttrAddr, addr),
+							logevent.Str(logevent.AttrErr, err.Error()))
 						continue
 					}
 					td, err := router.NewControlDialer(addr, a)
 					if err != nil {
-						core.Log.Printf("connect: refill: dialer for %s failed: %v", addr, err)
+						logevent.Emit(binlog.TagSystem, logevent.EventWinPoolRefill,
+							logevent.Str(logevent.AttrStage, "dialer_failed"),
+							logevent.Str(logevent.AttrAddr, addr),
+							logevent.Str(logevent.AttrErr, err.Error()))
 						continue
 					}
 					wired := wireDialer(td)
@@ -2097,8 +2808,8 @@ func main() {
 				case <-ticker.C:
 					last := dialerPool.LastDataTime()
 					if !last.IsZero() && time.Since(last) > watchdogStale {
-						core.Log.Printf("tunnel: watchdog: no data for %s  -  forcing silent refresh",
-							time.Since(last).Round(time.Second))
+						logevent.Emit(binlog.TagSystem, logevent.EventWinTunnelWatchdogStale,
+							logevent.Int(logevent.AttrIdleMs, time.Since(last).Milliseconds()))
 						startSilentRefresh()
 					}
 				}
@@ -2124,6 +2835,9 @@ func main() {
 				}
 				return dialerPool.Pick()
 			},
+			func() bool {
+				return trayApp != nil && trayApp.IsWildcatEnabled()
+			},
 		)
 
 		// Connection-stats upload: same channel/cadence as log upload above,
@@ -2140,6 +2854,9 @@ func main() {
 					return nil
 				}
 				return dialerPool.Pick()
+			},
+			func() bool {
+				return trayApp != nil && trayApp.IsWildcatEnabled()
 			},
 		)
 
@@ -2165,14 +2882,19 @@ func main() {
 					dialer.SetClientCC(cc)
 				}
 				if prev != "" && prev != cc {
-					core.Log.Printf("router: country changed %q  ->  %q  -  triggering reconnect", prev, cc)
+					logevent.Emit(binlog.TagSystem, logevent.EventWinCountryChange,
+						logevent.Str(logevent.AttrStage, "changed"),
+						logevent.Str(logevent.AttrFrom, prev),
+						logevent.Str(logevent.AttrTo, cc))
 					if trayApp != nil {
 						trayApp.TriggerReconnect()
 					}
 				} else {
 					// First detection: rebuild paths now so in-country controls are
 					// selected immediately, without waiting for the 60 s pool refresh.
-					core.Log.Printf("router: my region set to %q  -  rebuilding paths", cc)
+					logevent.Emit(binlog.TagSystem, logevent.EventWinCountryChange,
+						logevent.Str(logevent.AttrStage, "region_set"),
+						logevent.Str(logevent.AttrTo, cc))
 					router.BuildPaths()
 					if dialerPool != nil {
 						dialerPool.Swap(buildDialerSlice(buildViableAddrs(router.QualifyingControlAddrs())))
@@ -2193,7 +2915,7 @@ func main() {
 									}
 									dialerPool.Swap(buildDialerSlice(buildViableAddrs(router.QualifyingControlAddrs())))
 									if dialerPool.Size() >= len(router.QualifyingControlAddrs()) {
-										core.Log.Printf("connect: pool complete after retry")
+										logevent.Emit(binlog.TagSystem, logevent.EventWinCountryChange, logevent.Str(logevent.AttrStage, "pool_complete_after_retry"))
 										return
 									}
 								}
@@ -2208,7 +2930,10 @@ func main() {
 			skipCIDRInit := gpsDetected || settings.PreferredRegion != ""
 			discoveredMu.RUnlock()
 			if skipCIDRInit {
-				core.Log.Printf("router: skipping CIDR initial detection (gpsDetected=%v preferredRegion=%q)", gpsDetected, settings.PreferredRegion)
+				logevent.Emit(binlog.TagSystem, logevent.EventWinCountryChange,
+					logevent.Str(logevent.AttrStage, "cidr_init_skipped"),
+					logevent.Bool(logevent.AttrGpsDetected, gpsDetected),
+					logevent.Str(logevent.AttrRegion, settings.PreferredRegion))
 			} else {
 				for i := 0; i < 15; i++ {
 					select {
@@ -2248,21 +2973,29 @@ func main() {
 			}
 		}()
 
+		// This is the non-WildCat connect path -- the WildCat branch further up
+		// this function returns before ever reaching here (see its own
+		// IncConnect/StartWildcatSession calls).
 		connStatsCollector.IncConnect(!autoReconnect)
+		go runTopup()
 		return nil
 	}
 
 	onDisconnect := func(autoReconnect bool) {
+		// No-op if no WildCat session is active (regular connect, or already
+		// closed out above).
 		connStatsCollector.IncDisconnect(!autoReconnect)
 		if autoReconnect {
-			core.Log.Println("disconnecting... (auto-reconnect by code)")
+			logevent.Emit(binlog.TagSystem, logevent.EventWinDisconnect, logevent.Str(logevent.AttrStage, "auto_reconnect"))
 		} else {
-			core.Log.Println("disconnecting... (user-initiated)")
+			logevent.Emit(binlog.TagSystem, logevent.EventWinDisconnect, logevent.Str(logevent.AttrStage, "user_initiated"))
 		}
 		// Clear the connected flag so the watchdog knows no cleanup is needed
 		// if main exits cleanly after this point.
 		if err := core.WriteWatchdogState(core.WatchdogState{MainPID: os.Getpid()}); err != nil {
-			core.Log.Printf("warn: write watchdog state (disconnect): %v", err)
+			logevent.Emit(binlog.TagSystem, logevent.EventWinDisconnect,
+				logevent.Str(logevent.AttrStage, "watchdog_write_failed"),
+				logevent.Str(logevent.AttrErr, err.Error()))
 		}
 		router.CloseAllUDPPeers()
 		router.SetMyCountry("") // clear region filter so next connect re-evaluates
@@ -2326,7 +3059,7 @@ func main() {
 		if !autoReconnect {
 			removeOutboundFirewallRule()
 		}
-		core.Log.Println("disconnected")
+		logevent.Emit(binlog.TagSystem, logevent.EventWinDisconnect, logevent.Str(logevent.AttrStage, "disconnected"))
 	}
 
 	autoConnect := savedKey != nil // connect on startup whenever a valid key is present
@@ -2334,7 +3067,7 @@ func main() {
 	// Background update checker  -  runs for the lifetime of the app, independent
 	// of connect/disconnect cycles.  Uses discovered controls when available,
 	// falls back to key nodes.  Notifies the tray when a binary is ready.
-	upd := core.NewUpdater(func() []string {
+	upd = core.NewUpdater(func() []string {
 		discoveredMu.RLock()
 		dc := append([]string{}, discoveredControls...)
 		discoveredMu.RUnlock()
@@ -2383,8 +3116,8 @@ func main() {
 		initBlockQUIC = *settings.BlockQUIC
 	}
 
-	core.Log.Println("starting tray")
-	trayApp = snwin.NewTrayApp(core.Version, initialLogin, autoConnect, settings.DOHEnabled, initBlockQUIC, settings.PreferredRegion,
+	logevent.Emit(binlog.TagSystem, logevent.EventWinTrayStart)
+	trayApp = snwin.NewTrayApp(core.Version, initialLogin, autoConnect, settings.DOHEnabled, initBlockQUIC, settings.WildcatEnabled, settings.PreferredRegion,
 		onLogin, onLogout, onConnect, onDisconnect,
 		func(enabled bool) {
 			settings.DOHEnabled = enabled
@@ -2401,11 +3134,19 @@ func main() {
 					return
 				}
 				go func() {
-					core.Log.Printf("DoH: enabled by user  -  configuring")
+					logevent.Emit(binlog.TagSystem, logevent.EventWinDoh,
+						logevent.Str(logevent.AttrTrigger, "toggle"),
+						logevent.Str(logevent.AttrStage, "configuring"))
 					if err := snwin.ConfigureDoH(); err != nil {
-						core.Log.Printf("DoH toggle: netsh unavailable (%v)  -  starting local proxy", err)
+						logevent.Emit(binlog.TagSystem, logevent.EventWinDoh,
+							logevent.Str(logevent.AttrTrigger, "toggle"),
+							logevent.Str(logevent.AttrStage, "netsh_unavailable"),
+							logevent.Str(logevent.AttrErr, err.Error()))
 						if p, perr := snwin.ConfigureDoHFallback(); perr != nil {
-							core.Log.Printf("DoH toggle: proxy failed: %v", perr)
+							logevent.Emit(binlog.TagSystem, logevent.EventWinDoh,
+								logevent.Str(logevent.AttrTrigger, "toggle"),
+								logevent.Str(logevent.AttrStage, "proxy_failed"),
+								logevent.Str(logevent.AttrErr, perr.Error()))
 						} else {
 							dohMu.Lock()
 							dohProxy = p
@@ -2433,7 +3174,9 @@ func main() {
 					// 2026-08-12 incident this fixes: Google/YouTube/WhatsApp broke
 					// for a user after they toggled DoH off, because DNS leaked
 					// straight to the ISP instead of staying in the tunnel).
-					core.Log.Printf("DoH: disabled by user  -  DNS stays plain-UDP, still tunneled")
+					logevent.Emit(binlog.TagSystem, logevent.EventWinDoh,
+						logevent.Str(logevent.AttrTrigger, "toggle"),
+						logevent.Str(logevent.AttrStage, "disabled"))
 					if p != nil {
 						snwin.StopDoHFallback(p)
 					} else if n {
@@ -2446,16 +3189,33 @@ func main() {
 			v := enabled
 			settings.BlockQUIC = &v
 			saveClientSettings(appDataDir, settings)
-			core.Log.Printf("Disable QUIC: %v - applying live", enabled)
+			logevent.Emit(binlog.TagSystem, logevent.EventWinSettingsChange,
+				logevent.Str(logevent.AttrSetting, "block_quic"),
+				logevent.Str(logevent.AttrValue, fmt.Sprintf("%v", enabled)))
 			// Apply immediately to the running SOCKS5 server â€” no reconnect needed.
 			if socks5 != nil {
 				socks5.BlockQUIC = enabled
 			}
 		},
+		func(enabled bool) {
+			if enabled {
+				// Unconditional informational warning -- always shown when the
+				// user turns WildCat on, every time, no "don't show again".
+				snwin.ShowWildcatWarning()
+			}
+			settings.WildcatEnabled = enabled
+			saveClientSettings(appDataDir, settings)
+			logevent.Emit(binlog.TagSystem, logevent.EventWinSettingsChange,
+				logevent.Str(logevent.AttrSetting, "wildcat"),
+				logevent.Str(logevent.AttrValue, fmt.Sprintf("%v", enabled)))
+			// WildCat mode switches the underlying transport; always requires reconnect.
+		},
 		func(region string) {
 			settings.PreferredRegion = region
 			saveClientSettings(appDataDir, settings)
-			core.Log.Printf("region: user selected %q", region)
+			logevent.Emit(binlog.TagSystem, logevent.EventWinSettingsChange,
+				logevent.Str(logevent.AttrSetting, "region"),
+				logevent.Str(logevent.AttrValue, region))
 			if region != "" {
 				// Explicit region: apply immediately; CIDR detection is now skipped.
 				discoveredMu.Lock()
@@ -2505,6 +3265,11 @@ func main() {
 
 	trayApp.SetWindowCallback(func() { appWindow.Show() })
 	trayApp.SetStatusCallback(func() { appWindow.UpdateStatus(trayApp.GetAppStatus()) })
+	trayApp.SetSettingsChangeCallback(func() { appWindow.RefreshSettingsState(trayApp.GetAppSettings()) })
+	trayApp.SetBytesTickCallback(func() {
+		sent, recv := core.TotalBytes()
+		appWindow.UpdateBytes(sent, recv)
+	})
 	appWindow.Start()
 
 	trayApp.Run()
@@ -2517,7 +3282,7 @@ func main() {
 	close(stopWatchdogMonitor)
 	// Signal the watchdog that this is a clean exit  -  do not restart main.
 	snwin.SignalCleanShutdown()
-	core.Log.Println("clean shutdown signaled")
+	logevent.Emit(binlog.TagSystem, logevent.EventWinShutdownSignaled)
 }
 
 // hostOf strips scheme and path from a URL, returning "host" or "host:port".
@@ -2545,6 +3310,7 @@ type clientSettings struct {
 	DOHEnabled      bool   `json:"doh_enabled"`
 	BlockQUIC       *bool  `json:"block_quic,omitempty"`       // nil = use CC-based default (RU/CN); explicit = user override
 	PreferredRegion string `json:"preferred_region,omitempty"` // "" = Auto; "RU"/"EU"/"US"/"CN"/"XX"
+	WildcatEnabled  bool   `json:"wildcat_enabled,omitempty"`  // route via the WildCat covert-relay transport
 }
 
 func loadClientSettings(dir string) clientSettings {
@@ -2580,32 +3346,14 @@ func obtainActivationKey() (string, error) {
 	ctx := context.Background()
 	reachable := nc.Probe(ctx)
 
-	hasKey, answered := snwin.ShowHaveKeyPrompt()
-	if !answered {
-		return "", fmt.Errorf("cancelled")
-	}
-
-	if hasKey {
-		if !reachable {
-			keyStr, ok := snwin.ShowKeyDialog()
-			if !ok || keyStr == "" {
-				return "", fmt.Errorf("cancelled")
-			}
-			return keyStr, nil
-		}
-		keyStr, ok, wantsLogin := snwin.ShowKeyDialogWithLogin()
-		if wantsLogin {
-			return navlinkLoginFlow(nc, ctx)
-		}
-		if !ok || keyStr == "" {
-			return "", fmt.Errorf("cancelled")
-		}
-		return keyStr, nil
-	}
-
-	// No key: without navlink.net reachable, login can never succeed, so go
-	// straight to manual key entry (no Login button — it wouldn't work).
+	// The "do you have a key?" Yes/No prompt is no longer shown automatically
+	// -- go straight to the screen that matches reachability. The user can
+	// still switch manually: ShowKeyDialogWithLogin's "Log In Instead" button
+	// and ShowLoginDialog's "I Have a Key" button (below, via navlinkLoginFlow)
+	// remain fully wired.
 	if !reachable {
+		// Without navlink.net reachable, login can never succeed, so go
+		// straight to manual key entry (no Login button — it wouldn't work).
 		keyStr, ok := snwin.ShowKeyDialog()
 		if !ok || keyStr == "" {
 			return "", fmt.Errorf("cancelled")
@@ -2677,7 +3425,9 @@ func loadOrCreateDeviceID(appDataDir string) string {
 	}
 	id := uuid.New().String()
 	if err := os.WriteFile(path, []byte(id), 0600); err != nil {
-		core.Log.Printf("warn: save device_id: %v", err)
+		logevent.Emit(binlog.TagSystem, logevent.EventWinPersistFailed,
+			logevent.Str(logevent.AttrWhat, "device_id"),
+			logevent.Str(logevent.AttrErr, err.Error()))
 	}
 	return id
 }
@@ -2685,7 +3435,9 @@ func loadOrCreateDeviceID(appDataDir string) string {
 // saveCountry persists the client's ISO country code to appDataDir/country.txt.
 func saveCountry(dir, cc string) {
 	if err := os.WriteFile(filepath.Join(dir, "country.txt"), []byte(cc), 0600); err != nil {
-		core.Log.Printf("warn: save country: %v", err)
+		logevent.Emit(binlog.TagSystem, logevent.EventWinPersistFailed,
+			logevent.Str(logevent.AttrWhat, "country"),
+			logevent.Str(logevent.AttrErr, err.Error()))
 	}
 }
 
@@ -2788,7 +3540,7 @@ func ensureSingleInstance() bool {
 	// retry CreateMutex cleanly after the old process releases it.
 	closeHandle.Call(h)
 
-	core.Log.Printf("another instance is running â€” terminating it")
+	logevent.Emit(binlog.TagSystem, logevent.EventWinSingleInstance, logevent.Str(logevent.AttrStage, "terminating_other"))
 
 	// Signal the watchdog: this is an orderly upgrade, not a crash.
 	// The watchdog will skip networking cleanup and attach to our PID instead of
@@ -2815,10 +3567,10 @@ func ensureSingleInstance() bool {
 	h2, _, err2 := createMutex.Call(0, 1, uintptr(unsafe.Pointer(name)))
 	_ = h2 // intentionally leaked; OS releases on exit
 	if err2 == errAlreadyExists {
-		core.Log.Printf("ensureSingleInstance: could not acquire mutex after kill")
+		logevent.Emit(binlog.TagSystem, logevent.EventWinSingleInstance, logevent.Str(logevent.AttrStage, "kill_failed"))
 		return false
 	}
-	core.Log.Printf("ensureSingleInstance: old instance terminated, mutex acquired")
+	logevent.Emit(binlog.TagSystem, logevent.EventWinSingleInstance, logevent.Str(logevent.AttrStage, "old_terminated"))
 	return true
 }
 

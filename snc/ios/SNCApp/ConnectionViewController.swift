@@ -30,6 +30,18 @@ final class ConnectionViewController: UIViewController {
         return l
     }()
 
+    // Orange banner shown in WildCat mode while connected/connecting.
+    private let ribbonWildCat: UILabel = {
+        let l = UILabel()
+        l.text = L.t("wildcat.ribbon")
+        l.font = SNCTheme.Font.bold(13)
+        l.textColor = SNCTheme.textPrimary
+        l.textAlignment = .center
+        l.backgroundColor = SNCTheme.warmAmber
+        l.translatesAutoresizingMaskIntoConstraints = false
+        return l
+    }()
+
     // Tappable banner shown when UpdateChecker finds a newer App Store version.
     // Opens the App Store page — iOS (App Store distribution) gives no silent
     // download/install path, so this is the full extent of the "update" UI.
@@ -60,7 +72,7 @@ final class ConnectionViewController: UIViewController {
 
     private let txtKeyPlaceholder: UILabel = {
         let l = UILabel()
-        l.text = "Paste subscription key"
+        l.text = L.t("key.placeholder")
         l.textColor = SNCTheme.textMuted
         l.font = SNCTheme.Font.regular(16)
         l.numberOfLines = 0
@@ -71,7 +83,7 @@ final class ConnectionViewController: UIViewController {
 
     private let btnScan: UIButton = {
         var cfg = UIButton.Configuration.tinted()
-        cfg.title = "Scan QR"
+        cfg.title = L.t("key.scanQR")
         cfg.image = UIImage(systemName: "qrcode.viewfinder")
         cfg.imagePadding = 6
         cfg.cornerStyle = .medium
@@ -82,7 +94,7 @@ final class ConnectionViewController: UIViewController {
 
     private let btnScanFile: UIButton = {
         var cfg = UIButton.Configuration.tinted()
-        cfg.title = "Scan from Photo"
+        cfg.title = L.t("key.scanFromPhoto")
         cfg.image = UIImage(systemName: "photo")
         cfg.imagePadding = 6
         cfg.cornerStyle = .medium
@@ -95,7 +107,7 @@ final class ConnectionViewController: UIViewController {
     // reachable — switches from manual key entry to credential login.
     private let btnKeyEntryLogin: UIButton = {
         let b = UIButton(type: .system)
-        b.setTitle("Log In Instead", for: .normal)
+        b.setTitle(L.t("key.logInInstead"), for: .normal)
         b.setTitleColor(SNCTheme.textMuted, for: .normal)
         b.titleLabel?.font = SNCTheme.Font.medium(14)
         b.translatesAutoresizingMaskIntoConstraints = false
@@ -138,7 +150,7 @@ final class ConnectionViewController: UIViewController {
 
     private let txtEmail: UITextField = {
         let f = UITextField()
-        f.placeholder = "Email"
+        f.placeholder = L.t("credential.emailPlaceholder")
         f.keyboardType = .emailAddress
         f.autocapitalizationType = .none
         f.autocorrectionType = .no
@@ -149,7 +161,7 @@ final class ConnectionViewController: UIViewController {
 
     private let txtPassword: UITextField = {
         let f = UITextField()
-        f.placeholder = "Password"
+        f.placeholder = L.t("credential.passwordPlaceholder")
         f.isSecureTextEntry = true
         f.borderStyle = .roundedRect
         f.translatesAutoresizingMaskIntoConstraints = false
@@ -179,7 +191,7 @@ final class ConnectionViewController: UIViewController {
         var cfg = UIButton.Configuration.filled()
         cfg.cornerStyle = .large
         cfg.baseBackgroundColor = SNCTheme.screenCyan
-        cfg.title = "Login"
+        cfg.title = L.t("credential.login")
         let b = UIButton(configuration: cfg)
         b.translatesAutoresizingMaskIntoConstraints = false
         return b
@@ -187,7 +199,7 @@ final class ConnectionViewController: UIViewController {
 
     private let btnSwitchToKeyEntry: UIButton = {
         let b = UIButton(type: .system)
-        b.setTitle("I Have a Key", for: .normal)
+        b.setTitle(L.t("credential.iHaveKey"), for: .normal)
         b.setTitleColor(SNCTheme.textMuted, for: .normal)
         b.titleLabel?.font = SNCTheme.Font.medium(14)
         b.translatesAutoresizingMaskIntoConstraints = false
@@ -198,7 +210,7 @@ final class ConnectionViewController: UIViewController {
         var cfg = UIButton.Configuration.filled()
         cfg.cornerStyle = .large
         cfg.baseBackgroundColor = SNCTheme.screenCyan
-        cfg.title = "Connect"
+        cfg.title = L.t("connect.button")
         let b = UIButton(configuration: cfg)
         b.translatesAutoresizingMaskIntoConstraints = false
         return b
@@ -206,7 +218,7 @@ final class ConnectionViewController: UIViewController {
 
     private let btnLogout: UIButton = {
         let b = UIButton(type: .system)
-        b.setTitle("Remove Key", for: .normal)
+        b.setTitle(L.t("logout.removeKey"), for: .normal)
         b.setTitleColor(.systemRed, for: .normal)
         b.titleLabel?.font = SNCTheme.Font.medium(15)
         b.translatesAutoresizingMaskIntoConstraints = false
@@ -222,18 +234,49 @@ final class ConnectionViewController: UIViewController {
         return l
     }()
 
+    // Live uplink/downlink counter, bottom-right of the screen, above the
+    // version label. Hidden while not connected -- see startTrafficTimer/
+    // stopTrafficTimer and the SNCGetStatus â†’ IPCReply.bytesSent/bytesRecv
+    // channel in GoCore.swift / IPCProtocol.swift.
+    private let lblTraffic: UILabel = {
+        let l = UILabel()
+        l.font = SNCTheme.Font.regular(12)
+        l.textColor = SNCTheme.textMuted
+        l.textAlignment = .right
+        l.isHidden = true
+        l.translatesAutoresizingMaskIntoConstraints = false
+        return l
+    }()
+
     private var pollTimer: Timer?
+    private var tokenRefreshTimer: Timer?
+    private var trafficTimer: Timer?
+    private var pendingWildcatReconnect = false
     private var mainStackCenterY: NSLayoutConstraint!
 
+    // Baseline for edge-detecting a genuine transition INTO .connected (not
+    // just re-observing "still connected" on a later notification/poll) --
+    // used to fire the connect haptic exactly once per real connect, and to
+    // start/stop the traffic-counter timer. Set once from the real status
+    // right after VPNManager finishes loading, so an app relaunch that finds
+    // the tunnel already connected doesn't spuriously buzz.
+    private var lastKnownStatus: NEVPNStatus = .invalid
+
     // "No key yet" flow: which of the three screens is currently shown.
-    // Starts at the have-key prompt; explicitly reset there on logout so the
-    // flow restarts cleanly next time.
+    // Defaults to key-entry (safe fallback matching the unreachable case);
+    // the have-key prompt is no longer entered automatically. Reset to
+    // key-entry on logout so the flow restarts cleanly next time.
     private enum LoginScreen { case keyEntry, haveKeyPrompt, credentialLogin }
-    private var loginScreen: LoginScreen = .haveKeyPrompt
+    private var loginScreen: LoginScreen = .keyEntry
 
     // Set once by a background probe of navlink.net (see NavlinkAuth.probe) --
     // decides whether the credential-login path is offered at all.
     private var navlinkReachable = false
+
+    // True once the user has manually switched login screens -- once set,
+    // the reachability probe's completion handler no longer auto-switches
+    // from key-entry to credential-login on its own.
+    private var userSwitchedLoginScreen = false
 
     // MARK: - Lifecycle
 
@@ -247,7 +290,7 @@ final class ConnectionViewController: UIViewController {
 
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0"
         lblVersion.text = "v\(version)"
-        SLog("ConnectionVC: viewDidLoad v\(version)")
+        SLog("ConnectionVC: viewDidLoad v\(version) wildcatEnabled=\(VPNManager.shared.wildcatEnabled)")
 
         let hasKey = VPNManager.shared.loadKey().map { !$0.isEmpty } ?? false
         SLog("ConnectionVC: hasKey=\(hasKey), initialStatus=\(VPNManager.shared.connectionStatus.rawValue)")
@@ -262,8 +305,12 @@ final class ConnectionViewController: UIViewController {
             // go straight to navlink.net.
             NavlinkAuth.probe { [weak self] reachable in
                 DispatchQueue.main.async {
-                    self?.navlinkReachable = reachable
-                    self?.updateUI()
+                    guard let self else { return }
+                    self.navlinkReachable = reachable
+                    if reachable && !self.userSwitchedLoginScreen && self.loginScreen == .keyEntry {
+                        self.loginScreen = .credentialLogin
+                    }
+                    self.updateUI()
                 }
             }
         }
@@ -271,9 +318,16 @@ final class ConnectionViewController: UIViewController {
         VPNManager.shared.load { [weak self] err in
             DispatchQueue.main.async {
                 if let err {
-                    self?.showAlert("VPN setup failed: \(err.localizedDescription)")
+                    self?.showAlert(String(format: L.t("alert.vpnSetupFailed"), err.localizedDescription))
                 }
-                self?.updateUI()
+                guard let self else { return }
+                // Baseline only -- do NOT treat "already connected at launch" as a
+                // fresh transition (no haptic), but do start the traffic timer.
+                self.lastKnownStatus = VPNManager.shared.connectionStatus
+                if self.lastKnownStatus == .connected {
+                    self.startTrafficTimer()
+                }
+                self.updateUI()
             }
         }
 
@@ -304,11 +358,21 @@ final class ConnectionViewController: UIViewController {
         super.viewWillAppear(animated)
         startPoll()
         updateUI()
+        // Restart token refresh timer if WildCat is enabled and no timer is running.
+        if VPNManager.shared.wildcatEnabled && tokenRefreshTimer == nil {
+            startTokenRefresh()
+        }
+        if VPNManager.shared.connectionStatus == .connected {
+            startTrafficTimer()
+        }
     }
 
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
         stopPoll()
+        stopTrafficTimer()
+        // Token refresh timer keeps running while the app is active; stops only
+        // when WildCat is disabled or the VC is deallocated.
     }
 
     // MARK: - Layout
@@ -338,12 +402,13 @@ final class ConnectionViewController: UIViewController {
         actionStack.alignment = .center
         actionStack.translatesAutoresizingMaskIntoConstraints = false
 
-        let mainStack = UIStackView(arrangedSubviews: [imgState, lblStatus, ribbonUpdate, keyStack, haveKeyStack, credentialStack, actionStack])
+        let mainStack = UIStackView(arrangedSubviews: [imgState, lblStatus, ribbonWildCat, ribbonUpdate, keyStack, haveKeyStack, credentialStack, actionStack])
         mainStack.axis = .vertical
         mainStack.spacing = 20
         mainStack.alignment = .center
         mainStack.setCustomSpacing(12, after: imgState)
         mainStack.setCustomSpacing(0, after: lblStatus)
+        mainStack.setCustomSpacing(8, after: ribbonWildCat)
         mainStack.setCustomSpacing(28, after: ribbonUpdate)
         mainStack.translatesAutoresizingMaskIntoConstraints = false
 
@@ -356,6 +421,7 @@ final class ConnectionViewController: UIViewController {
 
         view.addSubview(mainStack)
         view.addSubview(lblVersion)
+        view.addSubview(lblTraffic)
 
         NSLayoutConstraint.activate([
             mainStack.centerXAnchor.constraint(equalTo: view.centerXAnchor),
@@ -368,6 +434,10 @@ final class ConnectionViewController: UIViewController {
 
             imgState.widthAnchor.constraint(equalToConstant: 96),
             imgState.heightAnchor.constraint(equalToConstant: 96),
+
+            ribbonWildCat.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            ribbonWildCat.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            ribbonWildCat.heightAnchor.constraint(equalToConstant: 36),
 
             ribbonUpdate.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             ribbonUpdate.trailingAnchor.constraint(equalTo: view.trailingAnchor),
@@ -388,6 +458,11 @@ final class ConnectionViewController: UIViewController {
 
             lblVersion.centerXAnchor.constraint(equalTo: view.centerXAnchor),
             lblVersion.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -16),
+
+            // Bottom-right, above the version label (the persistent bottom
+            // fixture nearest the connection-status indicator).
+            lblTraffic.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -16),
+            lblTraffic.bottomAnchor.constraint(equalTo: lblVersion.topAnchor, constant: -8),
         ])
 
         btnConnect.addTarget(self, action: #selector(connectTapped), for: .touchUpInside)
@@ -431,8 +506,23 @@ final class ConnectionViewController: UIViewController {
     // MARK: - Menu
 
     private func buildMenu() {
+        let wildcatOn = VPNManager.shared.wildcatEnabled
+
+        let wildcatAction = UIAction(
+            title: L.t("menu.wildcat"),
+            image: UIImage(systemName: "pawprint"),
+            state: wildcatOn ? .on : .off
+        ) { [weak self] _ in
+            guard let self else { return }
+            if VPNManager.shared.wildcatEnabled {
+                self.disableWildcat()
+            } else {
+                self.showWildcatWarning { self.enableWildcat() }
+            }
+        }
+
         let logsAction = UIAction(
-            title: "Share Logs",
+            title: L.t("menu.shareLogs"),
             image: UIImage(systemName: "square.and.arrow.up")
         ) { [weak self] _ in
             self?.shareLogs()
@@ -440,7 +530,7 @@ final class ConnectionViewController: UIViewController {
 
         navigationItem.rightBarButtonItem = UIBarButtonItem(
             image: UIImage(systemName: "ellipsis.circle"),
-            menu: UIMenu(children: [logsAction]))
+            menu: UIMenu(children: [wildcatAction, logsAction]))
     }
 
     // MARK: - Actions
@@ -467,14 +557,20 @@ final class ConnectionViewController: UIViewController {
         }
         let key = txtKey.text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !key.isEmpty else {
-            showAlert("Enter your subscription key first")
+            showAlert(L.t("alert.enterKeyFirst"))
             return
         }
         VPNManager.shared.saveKey(key)
         doConnect()
     }
 
+    // Starts the tunnel. WildCat credential acquisition (if enabled and the
+    // cached token is missing/stale) happens elsewhere; the toggle itself is
+    // unconditional here.
     private func doConnect() {
+        let wildcatOn = VPNManager.shared.wildcatEnabled
+        let hasToken  = VPNManager.shared.storedWildcatToken() != nil
+        log.info("doConnect: wildcat=\(wildcatOn), hasToken=\(hasToken)")
         connectAndReport()
     }
 
@@ -494,18 +590,19 @@ final class ConnectionViewController: UIViewController {
     @objc private func logoutTapped() {
         SLog("user: remove key tapped")
         let alert = UIAlertController(
-            title: "Remove Key",
-            message: "Remove your SNC key from this device?",
+            title: L.t("logout.confirmTitle"),
+            message: L.t("logout.confirmMessage"),
             preferredStyle: .alert)
-        alert.addAction(UIAlertAction(title: "Remove", style: .destructive) { [weak self] _ in
+        alert.addAction(UIAlertAction(title: L.t("logout.confirmRemove"), style: .destructive) { [weak self] _ in
             SLog("user: key removed confirmed")
             VPNManager.shared.disconnect()
             VPNManager.shared.saveKey("")
             self?.txtKey.text = ""
-            self?.loginScreen = .haveKeyPrompt
+            self?.loginScreen = .keyEntry
+            self?.userSwitchedLoginScreen = false
             self?.updateUI()
         })
-        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        alert.addAction(UIAlertAction(title: L.t("common.cancel"), style: .cancel))
         present(alert, animated: true)
     }
 
@@ -530,21 +627,25 @@ final class ConnectionViewController: UIViewController {
     // MARK: - "Do you have a key?" / credential login
 
     @objc private func keyEntryLoginTapped() {
+        userSwitchedLoginScreen = true
         loginScreen = .credentialLogin
         updateUI()
     }
 
     @objc private func haveKeyYesTapped() {
+        userSwitchedLoginScreen = true
         loginScreen = .keyEntry
         updateUI()
     }
 
     @objc private func haveKeyNoTapped() {
+        userSwitchedLoginScreen = true
         loginScreen = navlinkReachable ? .credentialLogin : .keyEntry
         updateUI()
     }
 
     @objc private func switchToKeyEntryTapped() {
+        userSwitchedLoginScreen = true
         loginScreen = .keyEntry
         updateUI()
     }
@@ -565,7 +666,7 @@ final class ConnectionViewController: UIViewController {
         let email = (txtEmail.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let password = txtPassword.text ?? ""
         guard !email.isEmpty, !password.isEmpty else {
-            lblCredentialError.text = "Please enter email and password"
+            lblCredentialError.text = L.t("credential.missingFields")
             updateUI()
             return
         }
@@ -600,8 +701,45 @@ final class ConnectionViewController: UIViewController {
     @objc private func vpnStatusChanged() {
         DispatchQueue.main.async {
             let status = VPNManager.shared.connectionStatus
-            self.log.info("vpnStatusChanged: status=\(status.rawValue)")
+            self.log.info("vpnStatusChanged: status=\(status.rawValue), pendingReconnect=\(self.pendingWildcatReconnect)")
+
+            // Genuine transition into the fully-connected state (not merely
+            // re-observing "still connected" on a later notification) --
+            // fires the triple haptic exactly once per real connect, and
+            // starts/stops the live traffic counter in step with it.
+            if status == .connected && self.lastKnownStatus != .connected {
+                self.triggerConnectHaptic()
+            }
+            if status == .connected {
+                self.startTrafficTimer()
+            } else {
+                self.stopTrafficTimer()
+            }
+            self.lastKnownStatus = status
+
+            if self.pendingWildcatReconnect, status == .disconnected {
+                self.pendingWildcatReconnect = false
+                if (VPNManager.shared.loadKey() ?? "").isEmpty == false {
+                    self.log.info("vpnStatusChanged: auto-reconnecting after WildCat toggle")
+                    self.doConnect()
+                }
+                return
+            }
             self.updateUI()
+        }
+    }
+
+    /// Three short haptic pulses on a genuine transition into "connected" --
+    /// must run on the main app process (this class), never inside the
+    /// Network Extension, which cannot trigger haptics at all.
+    private func triggerConnectHaptic() {
+        log.info("triggerConnectHaptic: firing 3 short impact pulses")
+        let generator = UIImpactFeedbackGenerator(style: .medium)
+        generator.prepare()
+        for i in 0..<3 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + Double(i) * 0.1) {
+                generator.impactOccurred()
+            }
         }
     }
 
@@ -620,6 +758,65 @@ final class ConnectionViewController: UIViewController {
         UIApplication.shared.open(update.storeURL)
     }
 
+    // MARK: - WildCat enable / disable
+
+    // Toggle is unconditional — no credential gate at toggle time.
+    // A token is acquired at connect time (doConnect), matching Android/macOS/Windows behavior.
+    private func enableWildcat() {
+        log.info("enableWildcat: status=\(VPNManager.shared.connectionStatus.rawValue)")
+        VPNManager.shared.setWildcat(true)
+        startTokenRefresh()
+        buildMenu()
+        updateUI()
+        let s = VPNManager.shared.connectionStatus
+        if s == .connected || s == .connecting {
+            log.info("enableWildcat: disconnecting for reconnect")
+            pendingWildcatReconnect = true
+            VPNManager.shared.disconnect()
+        }
+    }
+
+    private func showWildcatWarning(onConfirm: @escaping () -> Void) {
+        let alert = UIAlertController(
+            title: L.t("wildcat.warning.title"),
+            message: L.t("wildcat.warning.message"),
+            preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: L.t("common.ok"), style: .default) { _ in onConfirm() })
+        present(alert, animated: true)
+    }
+
+    private func disableWildcat() {
+        log.info("disableWildcat: status=\(VPNManager.shared.connectionStatus.rawValue)")
+        stopTokenRefresh()
+        VPNManager.shared.setWildcat(false)
+        buildMenu()
+        updateUI()
+        let s = VPNManager.shared.connectionStatus
+        if s == .connected || s == .connecting {
+            log.info("disableWildcat: disconnecting for reconnect")
+            pendingWildcatReconnect = true
+            VPNManager.shared.disconnect()
+        }
+    }
+
+    // MARK: - Token refresh
+
+    private func startTokenRefresh() {
+        stopTokenRefresh()
+        tokenRefreshTimer = Timer.scheduledTimer(withTimeInterval: 10 * 60, repeats: true) { [weak self] _ in
+            self?.performTokenRefresh()
+        }
+    }
+
+    private func stopTokenRefresh() {
+        tokenRefreshTimer?.invalidate()
+        tokenRefreshTimer = nil
+    }
+
+    private func performTokenRefresh() {
+        log.info("performTokenRefresh: starting silent refresh")
+    }
+
     // MARK: - Polling
 
     private func startPoll() {
@@ -633,17 +830,63 @@ final class ConnectionViewController: UIViewController {
         pollTimer = nil
     }
 
+    // MARK: - Live traffic counter
+
+    /// Starts (or no-ops if already running) a 1s timer that pulls the
+    /// current uplink/downlink byte counts through the existing status IPC
+    /// channel (VPNManager.fetchStatus â†’ IPCReply, sourced from
+    /// core.TotalBytes on the Go side) and refreshes lblTraffic.
+    private func startTrafficTimer() {
+        guard trafficTimer == nil else { return }
+        lblTraffic.isHidden = false
+        refreshTraffic()
+        trafficTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            self?.refreshTraffic()
+        }
+    }
+
+    private func stopTrafficTimer() {
+        trafficTimer?.invalidate()
+        trafficTimer = nil
+        lblTraffic.isHidden = true
+        lblTraffic.text = nil
+    }
+
+    private func refreshTraffic() {
+        VPNManager.shared.fetchStatus { [weak self] reply in
+            guard let self, let reply else { return }
+            DispatchQueue.main.async {
+                // Guard against a reply arriving just after disconnect raced
+                // ahead of it -- don't resurrect a hidden counter.
+                guard !self.lblTraffic.isHidden else { return }
+                self.lblTraffic.text = Self.formattedTraffic(sent: reply.bytesSent, recv: reply.bytesRecv)
+            }
+        }
+    }
+
+    private static func formattedTraffic(sent: Int64, recv: Int64) -> String {
+        let fmt = ByteCountFormatter()
+        fmt.countStyle = .binary
+        fmt.allowedUnits = [.useKB, .useMB, .useGB]
+        fmt.isAdaptive = true
+        fmt.includesUnit = true
+        fmt.includesCount = true
+        return "\u{2191} \(fmt.string(fromByteCount: sent))  \u{2193} \(fmt.string(fromByteCount: recv))"
+    }
+
     // MARK: - State
 
     private func updateUI() {
         let neStatus      = VPNManager.shared.connectionStatus
         let tunnelState   = VPNManager.shared.tunnelState
+        let wildcat       = VPNManager.shared.wildcatEnabled
         var hasKey        = !(VPNManager.shared.loadKey() ?? "").isEmpty
 
         let connected     = neStatus == .connected
         let connecting    = neStatus == .connecting || neStatus == .reasserting
         let disconnecting = neStatus == .disconnecting
         let keyDenied     = tunnelState == "key_denied"
+        let wildcatExpired = tunnelState == "wildcat_auth_expired"
         let busy          = connected || connecting
 
         // Clearing the saved key is what actually gets the user back to a
@@ -660,9 +903,12 @@ final class ConnectionViewController: UIViewController {
             hasKey = false
         }
 
+        // WildCat ribbon
+        ribbonWildCat.isHidden = !(busy && wildcat)
+
         // Update-available ribbon — tap opens the App Store page (see UpdateChecker).
         if let update = UpdateChecker.shared.availableUpdate {
-            ribbonUpdate.text = "Update available (v\(update.version)) — tap to update"
+            ribbonUpdate.text = String(format: L.t("status.updateAvailable"), update.version)
             ribbonUpdate.isHidden = false
         } else {
             ribbonUpdate.isHidden = true
@@ -671,8 +917,10 @@ final class ConnectionViewController: UIViewController {
         // Status image
         let imageName: String
         switch true {
-        case keyDenied:
+        case keyDenied, wildcatExpired:
             imageName = "snc_error"
+        case connected && wildcat:
+            imageName = "snc_wildcat"
         case connected:
             imageName = "snc_connected"
         case connecting || disconnecting:
@@ -687,11 +935,12 @@ final class ConnectionViewController: UIViewController {
 
         // Status text
         lblStatus.text = {
-            if keyDenied      { return "Key rejected — check your subscription" }
-            if connected      { return "Connected" }
-            if connecting    { return "Connecting…" }
-            if disconnecting { return "Disconnecting…" }
-            return hasKey ? "Tap Connect to start" : "Enter key to get started"
+            if keyDenied      { return L.t("status.keyRejected") }
+            if wildcatExpired { return L.t("status.wildcatExpired") }
+            if connected      { return wildcat ? L.t("status.connectedWildcat") : L.t("status.connected") }
+            if connecting    { return L.t("status.connecting") }
+            if disconnecting { return L.t("status.disconnecting") }
+            return hasKey ? L.t("status.tapConnect") : L.t("status.enterKey")
         }()
 
         // "No key yet" flow: exactly one of key-entry / have-key-prompt /
@@ -721,7 +970,7 @@ final class ConnectionViewController: UIViewController {
         var cfg = UIButton.Configuration.filled()
         cfg.cornerStyle = .large
         cfg.baseBackgroundColor = busy ? .systemRed : SNCTheme.screenCyan
-        cfg.title = busy ? "Disconnect" : "Connect"
+        cfg.title = busy ? L.t("connect.disconnect") : L.t("connect.button")
         btnConnect.configuration = cfg
         btnConnect.isEnabled = !disconnecting
 
@@ -738,7 +987,7 @@ final class ConnectionViewController: UIViewController {
                 let key = (data.flatMap { String(data: $0, encoding: .utf8) } ?? "")
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 DispatchQueue.main.async {
-                    if key.isEmpty { self?.showAlert("Failed to fetch key from URL") }
+                    if key.isEmpty { self?.showAlert(L.t("alert.fetchKeyFailed")) }
                     else           { self?.applyKey(key) }
                 }
             }.resume()
@@ -753,11 +1002,11 @@ final class ConnectionViewController: UIViewController {
     }
 
     func applyKey(_ key: String) {
-        guard !key.isEmpty else { showAlert("Empty key received"); return }
+        guard !key.isEmpty else { showAlert(L.t("alert.emptyKey")); return }
         txtKey.text = key
         VPNManager.shared.saveKey(key)
         updateUI()
-        showAlert("Key saved — tap Connect")
+        showAlert(L.t("alert.keySaved"))
     }
 
     private func showAlert(_ message: String) {
@@ -770,7 +1019,7 @@ final class ConnectionViewController: UIViewController {
         SLog("shareLogs: requested")
         guard let container = FileManager.default.containerURL(
             forSecurityApplicationGroupIdentifier: "group.net.shortnerdcat") else {
-            showAlert("Cannot access app container"); return
+            showAlert(L.t("alert.noAppContainer")); return
         }
         let logDir = container.appendingPathComponent("Library/Logs/tunnel")
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -788,7 +1037,7 @@ final class ConnectionViewController: UIViewController {
                 } ?? []
 
             guard !logFiles.isEmpty else {
-                DispatchQueue.main.async { self.showAlert("No logs found") }
+                DispatchQueue.main.async { self.showAlert(L.t("alert.noLogsFound")) }
                 return
             }
 
@@ -837,7 +1086,7 @@ extension ConnectionViewController: PHPickerViewControllerDelegate {
             let features = detector?.features(in: ciImage) as? [CIQRCodeFeature] ?? []
             guard let msg = features.first?.messageString else {
                 DispatchQueue.main.async {
-                    self?.showAlert("No QR code found in image")
+                    self?.showAlert(L.t("alert.noQRFound"))
                 }
                 return
             }
