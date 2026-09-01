@@ -38,15 +38,11 @@ var iconConnectedPNG []byte
 //go:embed assets/snc_error.png
 var iconErrorPNG []byte
 
-//go:embed assets/snc_wildcat.png
-var iconWildcatPNG []byte
-
 // Cached ICO bytes for each state (built once at package init).
 var (
 	icoIdle       []byte
 	icoConnecting []byte
 	icoConnected  []byte
-	icoWildcat    []byte
 	icoError      []byte
 	icoQuitDim    []byte // dark-gray â€” alternates with icoIdle to create a blinking quit indicator
 )
@@ -55,7 +51,6 @@ func init() {
 	icoIdle = pngToICO(iconIdlePNG)
 	icoConnecting = pngToICO(iconConnectingPNG)
 	icoConnected = pngToICO(iconConnectedPNG)
-	icoWildcat = pngToICO(iconWildcatPNG)
 	icoError = pngToICO(iconErrorPNG)
 	icoQuitDim = coloredICO(48, 48, 48)
 }
@@ -280,9 +275,6 @@ func (a *TrayApp) IsDNSOverHTTPSEnabled() bool {
 }
 
 func (a *TrayApp) connectedIcon() []byte {
-	if a.IsWildcatEnabled() {
-		return icoWildcat
-	}
 	return icoConnected
 }
 
@@ -424,7 +416,6 @@ func (a *TrayApp) onReady() {
 	systray.AddSeparator()
 	a.mDNSOverHTTPS = systray.AddMenuItemCheckbox(T("tray_doh"), T("tray_doh_tip"), a.dohEnabled)
 	a.mBlockQUIC = systray.AddMenuItemCheckbox(T("tray_block_quic"), T("tray_block_quic_tip"), a.blockQUICEnabled)
-	a.mWildcat = systray.AddMenuItemCheckbox(T("tray_wildcat"), T("tray_wildcat_tip"), a.wildcatEnabled)
 	a.mRegion = systray.AddMenuItem(T("tray_region_prefix")+regionName(a.preferredRegion), T("tray_region_tip"))
 	a.mRegionAuto = a.mRegion.AddSubMenuItemCheckbox(T("region_auto"), T("tray_region_auto_tip"), a.preferredRegion == "")
 	a.mRegionRussia = a.mRegion.AddSubMenuItemCheckbox(T("region_russia"), T("region_russia"), a.preferredRegion == "RU")
@@ -449,7 +440,6 @@ func (a *TrayApp) onReady() {
 		a.mDisconnect.Hide()
 		a.mDNSOverHTTPS.Hide()
 		a.mBlockQUIC.Hide()
-		a.mWildcat.Hide()
 		a.mRegion.Hide()
 		// "Not logged in yet" is a normal startup state, not a failure -- keep
 		// the tray's error-look icon (pre-existing behavior) but don't surface
@@ -527,23 +517,6 @@ func (a *TrayApp) onReady() {
 					logevent.Str(logevent.AttrDetail, fmt.Sprintf("%v", a.mBlockQUIC.Checked())))
 				if a.onBlockQUICChange != nil {
 					a.onBlockQUICChange(a.mBlockQUIC.Checked())
-				}
-				a.notifySettingsChange()
-			case <-a.mWildcat.ClickedCh:
-				logevent.Emit(binlog.TagSystem, logevent.EventWinTrayMenuAction,
-					logevent.Str(logevent.AttrAction, "wildcat_toggle"),
-					logevent.Str(logevent.AttrDetail, fmt.Sprintf("was_checked=%v", a.mWildcat.Checked())))
-				if a.mWildcat.Checked() {
-					a.mWildcat.Uncheck()
-				} else {
-					a.mWildcat.Check()
-				}
-				logevent.Emit(binlog.TagSystem, logevent.EventWinTrayMenuAction,
-					logevent.Str(logevent.AttrAction, "wildcat_now"),
-					logevent.Str(logevent.AttrDetail, fmt.Sprintf("%v", a.mWildcat.Checked())))
-				a.refreshBlockQUICVisibility()
-				if a.onWildcatChange != nil {
-					a.onWildcatChange(a.mWildcat.Checked())
 				}
 				a.notifySettingsChange()
 			case <-a.mRegionAuto.ClickedCh:
@@ -649,7 +622,6 @@ func (a *TrayApp) doLogin() {
 	a.mConnect.Show()
 	a.mDNSOverHTTPS.Show()
 	a.mBlockQUIC.Show()
-	a.mWildcat.Show()
 	a.mRegion.Show()
 }
 
@@ -823,7 +795,6 @@ func (a *TrayApp) doConnect(autoReconnect bool) {
 	// showing unconditionally here is safe.
 	a.mDNSOverHTTPS.Show()
 	a.mBlockQUIC.Show()
-	a.mWildcat.Show()
 	a.mRegion.Show()
 
 	go a.tickElapsed(stop)
@@ -959,7 +930,6 @@ func (a *TrayApp) doDisconnect(autoReconnect bool) {
 			a.mLogout.Show()
 			a.mDNSOverHTTPS.Show()
 			a.mBlockQUIC.Show()
-			a.mWildcat.Show()
 			a.mRegion.Show()
 		}
 	}

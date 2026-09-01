@@ -26,7 +26,6 @@ import (
 	"github.com/anacrolix/torrent/metainfo"
 	"github.com/google/uuid"
 	"golang.org/x/sys/windows"
-	"shortnerdcat/snc/shared/keymigrate"
 	"shortnerdcat/snc/shared/navlinkauth"
 	snwin "shortnerdcat/snc/win/windows"
 	"tunnel_cat/binlog"
@@ -824,7 +823,7 @@ func main() {
 		}
 		torrentOnce.Do(func() {
 			torrentEngine = core.NewTorrentEngine(filepath.Join(appDataDir, "torrents"))
-			if err := torrentEngine.Start(); err != nil {
+			if err := torrentEngine.Start(nil); err != nil {
 				logevent.Emit(binlog.TagSystem, logevent.EventWinSettingsChange,
 					logevent.Str(logevent.AttrSetting, "torrent_engine"),
 					logevent.Str(logevent.AttrErr, err.Error()))
@@ -903,25 +902,11 @@ func main() {
 		kd, err := core.ParseKeyString(keyStr)
 		if err == nil && kd.IsLegacy() {
 			// Legacy (V1, unsigned) key found on disk: its ControlNodes/
-			// Servers list is not verifiable (see snc/shared/keymigrate's
-			// doc comment), so it must not be dialed as-is. Migrate first;
-			// on failure, treat as if no usable key were on disk at all --
-			// do NOT fall through to auto-connecting with the unverified
-			// list below.
-			core.Log.Printf("startup: legacy V1 key on disk for %s, migrating to V2", kd.Username)
-			migCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-			newKeyStr, newKD, migErr := keymigrate.Migrate(migCtx, kd)
-			cancel()
-			if migErr != nil {
-				core.Log.Printf("startup: legacy key migration failed, skipping auto-connect: %v", migErr)
-				kd, err = nil, fmt.Errorf("legacy key migration failed: %w", migErr)
-			} else {
-				core.Log.Printf("startup: legacy key migrated OK, key_id=%s", newKD.KeyID)
-				if saveErr := snwin.SaveKey(newKeyStr); saveErr != nil {
-					core.Log.Printf("startup: could not persist migrated key: %v", saveErr)
-				}
-				keyStr, kd = newKeyStr, newKD
-			}
+			// Servers list is not verifiable, and this edition has no
+			// migration path for it -- treat as if no usable key were on
+			// disk at all rather than dialing it as-is.
+			core.Log.Printf("startup: legacy V1 key on disk for %s, rejected (no migration path)", kd.Username)
+			kd, err = nil, fmt.Errorf("legacy V1 key not supported")
 		}
 		if err == nil && len(kd.Nodes()) > 0 {
 			savedKey = kd
@@ -1298,24 +1283,11 @@ func main() {
 		}
 
 		// Legacy (V1, unsigned) key: its ControlNodes/Servers list is not
-		// verifiable (see snc/shared/keymigrate's doc comment) -- silently
-		// exchange it for a fresh, arbiter-signed V2 key using the
-		// credentials it carries, authenticated against navlink.net
-		// directly rather than anything derived from the key itself. If
-		// this fails, the key is treated as unauthenticated: we do NOT
-		// fall back to dialing its own (unverifiable) node list.
+		// verifiable, and this edition has no migration path for it -- reject
+		// outright rather than dialing its unverifiable node list.
 		if kd.IsLegacy() {
-			core.Log.Printf("login: legacy V1 key detected for %s, migrating to V2", kd.Username)
-			migCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-			newKeyStr, newKD, migErr := keymigrate.Migrate(migCtx, kd)
-			cancel()
-			if migErr != nil {
-				core.Log.Printf("login: legacy key migration failed: %v", migErr)
-				return fmt.Errorf("could not renew your key (please try again or contact support): %w", migErr)
-			}
-			core.Log.Printf("login: legacy key migrated OK, key_id=%s", newKD.KeyID)
-			keyStr = newKeyStr
-			kd = newKD
+			core.Log.Printf("login: legacy V1 key detected for %s, rejected (no migration path)", kd.Username)
+			return fmt.Errorf("this key uses an old format that is no longer supported (please request a new key)")
 		}
 
 		tryLoginAuth := func(url string) bool {

@@ -18,7 +18,6 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"net"
 	"os"
@@ -26,9 +25,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
-	"time"
 
-	"shortnerdcat/snc/shared/keymigrate"
 	"tunnel_cat/binlog"
 	"tunnel_cat/logevent"
 	core "tunnel_cat/snc/core"
@@ -99,25 +96,12 @@ func main() {
 	}
 
 	// Legacy (V1, unsigned) key: its ControlNodes/Servers list is not
-	// verifiable (see snc/shared/keymigrate's doc comment), so it must not
-	// be dialed as-is. Migrate first; on failure, refuse to start -- do NOT
-	// fall back to using its own (unverifiable) node list. Unlike the full
-	// clients, this subprocess has no persistence of its own (SNC_KEY is
-	// handed to it fresh by its Ratatosk parent process each launch), so
-	// this migrates in-memory every run rather than saving the new key --
-	// slightly more startup latency, not a security gap.
+	// verifiable, and this edition has no migration path for it -- refuse to
+	// start rather than dialing its unverifiable node list.
 	if kd.IsLegacy() {
-		core.Log.Printf("snc-core-proxy: legacy V1 key detected for %s, migrating to V2", kd.Username)
-		migCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		_, newKD, migErr := keymigrate.Migrate(migCtx, kd)
-		cancel()
-		if migErr != nil {
-			core.Log.Printf("snc-core-proxy: legacy key migration failed: %v", migErr)
-			writeState(dataDir, "key_error")
-			os.Exit(1)
-		}
-		core.Log.Printf("snc-core-proxy: legacy key migrated OK, key_id=%s", newKD.KeyID)
-		kd = newKD
+		core.Log.Printf("snc-core-proxy: legacy V1 key detected for %s, rejected (no migration path)", kd.Username)
+		writeState(dataDir, "key_error")
+		os.Exit(1)
 	}
 
 	runSnc(dataDir, kd)

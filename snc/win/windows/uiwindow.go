@@ -37,10 +37,7 @@ var catConnectingPNG []byte
 //go:embed assets/illustration_connected.png
 var catConnectedPNG []byte
 
-//go:embed assets/illustration_wildcat.png
-var catWildcatPNG []byte
-
-// Club-theme variants of the same four illustrations -- same layout/content
+// Club-theme variants of the same three illustrations -- same layout/content
 // as the default set above, only the color palette and artwork differ (see
 // AppWindow.ClubTheme). No "error" variants: this client has no error
 // illustration slot at all yet (see catEntry usage in initGDI), so there's
@@ -55,9 +52,6 @@ var catConnectingPNGCatClub []byte
 //go:embed assets/illustration_connected_catclub.png
 var catConnectedPNGCatClub []byte
 
-//go:embed assets/illustration_wildcat_catclub.png
-var catWildcatPNGCatClub []byte
-
 //go:embed assets/illustration_idle_elite.png
 var catIdlePNGElite []byte
 
@@ -66,9 +60,6 @@ var catConnectingPNGElite []byte
 
 //go:embed assets/illustration_connected_elite.png
 var catConnectedPNGElite []byte
-
-//go:embed assets/illustration_wildcat_elite.png
-var catWildcatPNGElite []byte
 
 // â”€â”€ Layout â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
@@ -208,7 +199,6 @@ const (
 	uiIDDoH         = 104
 	uiIDRegion      = 107
 	uiIDBlockQUIC   = 108
-	uiIDWildCat     = 109
 	uiIDByteCounter = 110
 
 	// Native menu-bar item IDs (separate range from control IDs above so
@@ -220,7 +210,6 @@ const (
 	uiIDMenuDisconnect   = 303
 	uiIDMenuDoH          = 304
 	uiIDMenuBlockQUIC    = 305
-	uiIDMenuWildcat      = 306
 	uiIDMenuRegionAuto   = 307
 	uiIDMenuRegionRussia = 308
 	uiIDMenuRegionEurope = 309
@@ -401,7 +390,6 @@ type AppWindow struct {
 	catIdleDC, catIdleBM       uintptr
 	catConnectingDC, catConnBM uintptr
 	catConnectedDC, catConBM   uintptr
-	catWildcatDC, catWildcatBM uintptr
 
 	// Full-window-sized (uiWÃ—uiH) versions of the same illustrations, stretched
 	// to fill the whole content area as the background instead of bg.png --
@@ -410,7 +398,6 @@ type AppWindow struct {
 	catIdleBgDC, catIdleBgBM             uintptr
 	catConnectingBgDC, catConnectingBgBM uintptr
 	catConnectedBgDC, catConnectedBgBM   uintptr
-	catWildcatBgDC, catWildcatBgBM       uintptr
 
 	// Window HICON â€” tracked so the previous handle is destroyed before replacement
 	// (CreateIconFromResourceEx leaks one handle per call otherwise).
@@ -422,7 +409,6 @@ type AppWindow struct {
 	hRegion     uintptr // region combobox
 	hDoH        uintptr // native checkboxes on Settings tab
 	hBlockQUIC  uintptr
-	hWildCat    uintptr
 	hBytesLabel uintptr // uplink/downlink counter, above the tunnel status bar; see UpdateBytes
 
 	// State â€” updated from any goroutine, read in WndProc (always on runLoop thread)
@@ -682,9 +668,7 @@ func (aw *AppWindow) paintBackground(hdc uintptr) {
 	s := aw.status
 	aw.mu.Unlock()
 	bgDC := aw.catIdleBgDC
-	if s.Connected && s.Mode == "wildcat" {
-		bgDC = aw.catWildcatBgDC
-	} else if s.Connected {
+	if s.Connected {
 		bgDC = aw.catConnectedBgDC
 	} else if s.Connecting || s.Disconnecting {
 		bgDC = aw.catConnectingBgDC
@@ -817,7 +801,6 @@ const (
 	statusBarGray   uint32 = 120 | (120 << 8) | (120 << 16) // disconnected
 	statusBarOrange uint32 = 230 | (140 << 8) | (20 << 16)  // connecting/disconnecting
 	statusBarRed    uint32 = 200 | (40 << 8) | (40 << 16)   // error
-	statusBarBlack  uint32 = 12 | (12 << 8) | (12 << 16)    // wildcat
 )
 
 func (aw *AppWindow) paintTunnel(hdc uintptr) {
@@ -864,9 +847,6 @@ func (aw *AppWindow) paintTunnel(hdc uintptr) {
 			statusText = s.ErrorMsg
 		}
 		barColor = statusBarRed
-	case s.Connected && s.Mode == "wildcat":
-		statusText = T("status_connected_wildcat")
-		barColor = statusBarBlack
 	case s.Connected:
 		statusText = T("status_connected")
 		barColor = statusBarGreen
@@ -1011,7 +991,7 @@ func (aw *AppWindow) handleCommand(id, notif uint16) {
 			logevent.Emit(binlog.TagSystem, logevent.EventWinUiwindowMenu, logevent.Str(logevent.AttrAction, "disconnect"))
 			go aw.DisconnectFn()
 		}
-	case uiIDDoH, uiIDBlockQUIC, uiIDWildCat:
+	case uiIDDoH, uiIDBlockQUIC:
 		if notif == uiBN_CLICKED {
 			logevent.Emit(binlog.TagSystem, logevent.EventWinUiwindowMenu,
 				logevent.Str(logevent.AttrAction, "checkbox_toggle"),
@@ -1051,9 +1031,6 @@ func (aw *AppWindow) handleCommand(id, notif uint16) {
 	case uiIDMenuBlockQUIC:
 		logevent.Emit(binlog.TagSystem, logevent.EventWinUiwindowMenu, logevent.Str(logevent.AttrAction, "quic_toggle"))
 		aw.toggleMenuSetting(func(s *AppSettings) { s.BlockQUIC = !s.BlockQUIC })
-	case uiIDMenuWildcat:
-		logevent.Emit(binlog.TagSystem, logevent.EventWinUiwindowMenu, logevent.Str(logevent.AttrAction, "wildcat_toggle"))
-		aw.toggleMenuSetting(func(s *AppSettings) { s.WildCat = !s.WildCat })
 	case uiIDMenuRegionAuto:
 		aw.setMenuRegion("")
 	case uiIDMenuRegionRussia:
@@ -1125,7 +1102,6 @@ func (aw *AppWindow) saveSettings() {
 		DoH:       checkboxChecked(aw.hDoH),
 		BlockQUIC: checkboxChecked(aw.hBlockQUIC),
 		Region:    regionFromIndex(comboGetSel(aw.hRegion)),
-		WildCat:   checkboxChecked(aw.hWildCat),
 	})
 	// Re-read canonical settings (tray may have applied mutual exclusion)
 	// and mirror back to controls.
@@ -1141,8 +1117,6 @@ func (aw *AppWindow) syncWindowIcon() {
 	var ico []byte
 	var icoName string
 	switch {
-	case s.Connected && s.Mode == "wildcat":
-		ico, icoName = icoWildcat, "wildcat"
 	case s.Connected:
 		ico, icoName = icoConnected, "connected"
 	case s.Disconnecting, s.Connecting:
@@ -1198,7 +1172,6 @@ func (aw *AppWindow) syncTabControls() {
 	showIf(aw.hRegion, settings)
 	showIf(aw.hDoH, settings)
 	showIf(aw.hBlockQUIC, settings)
-	showIf(aw.hWildCat, settings)
 	if tunnel {
 		aw.syncConnectButtons()
 	}
@@ -1357,14 +1330,14 @@ func (aw *AppWindow) runLoop() {
 
 // themedCatPNGs picks the illustration byte-slice set matching aw.ClubTheme,
 // falling back to the default set for an unrecognized value.
-func (aw *AppWindow) themedCatPNGs() (idle, connecting, connected, wildcat []byte) {
+func (aw *AppWindow) themedCatPNGs() (idle, connecting, connected []byte) {
 	switch aw.ClubTheme {
 	case "catclub":
-		return catIdlePNGCatClub, catConnectingPNGCatClub, catConnectedPNGCatClub, catWildcatPNGCatClub
+		return catIdlePNGCatClub, catConnectingPNGCatClub, catConnectedPNGCatClub
 	case "elite":
-		return catIdlePNGElite, catConnectingPNGElite, catConnectedPNGElite, catWildcatPNGElite
+		return catIdlePNGElite, catConnectingPNGElite, catConnectedPNGElite
 	default:
-		return catIdlePNG, catConnectingPNG, catConnectedPNG, catWildcatPNG
+		return catIdlePNG, catConnectingPNG, catConnectedPNG
 	}
 }
 
@@ -1443,8 +1416,8 @@ func (aw *AppWindow) initGDI() {
 		logevent.Str(logevent.AttrStage, "bg_ready"),
 		logevent.Str(logevent.AttrDetail, fmt.Sprintf("%dx%d", uiW, uiH)))
 
-	idlePNG, connectingPNG, connectedPNG, wildcatPNG := aw.themedCatPNGs()
-	aw.loadCatBitmaps(idlePNG, connectingPNG, connectedPNG, wildcatPNG)
+	idlePNG, connectingPNG, connectedPNG := aw.themedCatPNGs()
+	aw.loadCatBitmaps(idlePNG, connectingPNG, connectedPNG)
 }
 
 // catEntry pairs one illustration's source PNG bytes with the DC/bitmap
@@ -1465,13 +1438,12 @@ type catEntry struct {
 // Callers must free any bitmaps already present in the target fields
 // before calling this (see freeGDI's freeDIB pattern) -- it always
 // overwrites, never frees what it's replacing.
-func (aw *AppWindow) loadCatBitmaps(idlePNG, connectingPNG, connectedPNG, wildcatPNG []byte) {
+func (aw *AppWindow) loadCatBitmaps(idlePNG, connectingPNG, connectedPNG []byte) {
 	// Load cat images (pre-multiplied alpha, catSizeÃ—catSize).
 	cats := []catEntry{
 		{idlePNG, &aw.catIdleDC, &aw.catIdleBM},
 		{connectingPNG, &aw.catConnectingDC, &aw.catConnBM},
 		{connectedPNG, &aw.catConnectedDC, &aw.catConBM},
-		{wildcatPNG, &aw.catWildcatDC, &aw.catWildcatBM},
 	}
 	for _, c := range cats {
 		img, err := png.Decode(bytes.NewReader(c.data))
@@ -1527,7 +1499,6 @@ func (aw *AppWindow) loadCatBitmaps(idlePNG, connectingPNG, connectedPNG, wildca
 		{idlePNG, &aw.catIdleBgDC, &aw.catIdleBgBM},
 		{connectingPNG, &aw.catConnectingBgDC, &aw.catConnectingBgBM},
 		{connectedPNG, &aw.catConnectedBgDC, &aw.catConnectedBgBM},
-		{wildcatPNG, &aw.catWildcatBgDC, &aw.catWildcatBgBM},
 	}
 	for _, c := range catsBg {
 		img, err := png.Decode(bytes.NewReader(c.data))
@@ -1608,11 +1579,9 @@ func (aw *AppWindow) freeGDI() {
 	freeDIB(aw.catIdleDC, aw.catIdleBM)
 	freeDIB(aw.catConnectingDC, aw.catConnBM)
 	freeDIB(aw.catConnectedDC, aw.catConBM)
-	freeDIB(aw.catWildcatDC, aw.catWildcatBM)
 	freeDIB(aw.catIdleBgDC, aw.catIdleBgBM)
 	freeDIB(aw.catConnectingBgDC, aw.catConnectingBgBM)
 	freeDIB(aw.catConnectedBgDC, aw.catConnectedBgBM)
-	freeDIB(aw.catWildcatBgDC, aw.catWildcatBgBM)
 }
 
 // ReloadClubTheme requests switching the illustration set and header badge
@@ -1694,15 +1663,13 @@ func (aw *AppWindow) applyClubTheme(theme, badgeText string) {
 	freeDIB(aw.catIdleDC, aw.catIdleBM)
 	freeDIB(aw.catConnectingDC, aw.catConnBM)
 	freeDIB(aw.catConnectedDC, aw.catConBM)
-	freeDIB(aw.catWildcatDC, aw.catWildcatBM)
 	freeDIB(aw.catIdleBgDC, aw.catIdleBgBM)
 	freeDIB(aw.catConnectingBgDC, aw.catConnectingBgBM)
 	freeDIB(aw.catConnectedBgDC, aw.catConnectedBgBM)
-	freeDIB(aw.catWildcatBgDC, aw.catWildcatBgBM)
 
 	aw.ClubTheme = theme
-	idlePNG, connectingPNG, connectedPNG, wildcatPNG := aw.themedCatPNGs()
-	aw.loadCatBitmaps(idlePNG, connectingPNG, connectedPNG, wildcatPNG)
+	idlePNG, connectingPNG, connectedPNG := aw.themedCatPNGs()
+	aw.loadCatBitmaps(idlePNG, connectingPNG, connectedPNG)
 
 	if aw.hwnd != 0 {
 		uiInvalidateRectFn.Call(aw.hwnd, 0, 0) // bErase=FALSE -- WM_PAINT double-buffers everything
@@ -1747,7 +1714,6 @@ func (aw *AppWindow) createMenuBar() uintptr {
 	appendSep(hMain)
 	appendStr(hMain, uiIDMenuDoH, T("tray_doh"))
 	appendStr(hMain, uiIDMenuBlockQUIC, T("tray_block_quic"))
-	appendStr(hMain, uiIDMenuWildcat, T("tray_wildcat"))
 
 	hRegion, _, _ := uiCreatePopupMenuFn.Call()
 	appendStr(hRegion, uiIDMenuRegionAuto, T("region_auto"))
@@ -1807,7 +1773,6 @@ func (aw *AppWindow) syncMenuState(s AppSettings) {
 	}
 	uiCheckMenuItemFn.Call(aw.hMenuMain, uiIDMenuDoH, checkFlag(s.DoH))
 	uiCheckMenuItemFn.Call(aw.hMenuMain, uiIDMenuBlockQUIC, checkFlag(s.BlockQUIC))
-	uiCheckMenuItemFn.Call(aw.hMenuMain, uiIDMenuWildcat, checkFlag(s.WildCat))
 
 	if aw.hMenuRegion != 0 {
 		regionIDs := map[string]uintptr{
@@ -1931,8 +1896,6 @@ func (aw *AppWindow) createControls(hInst uintptr) {
 	setText(aw.hDoH, T("checkbox_doh"))
 	aw.hBlockQUIC = mk("BUTTON", uiBSAUTOCHECKBOX|uiWS_TABSTOP, sx, s1+52, 220, 22, uiIDBlockQUIC)
 	setText(aw.hBlockQUIC, T("tray_block_quic"))
-	aw.hWildCat = mk("BUTTON", uiBSAUTOCHECKBOX|uiWS_TABSTOP, sx, s1+82, 220, 22, uiIDWildCat)
-	setText(aw.hWildCat, T("tray_wildcat"))
 }
 
 func (aw *AppWindow) applySettingsToControls(s AppSettings) {
@@ -1945,7 +1908,6 @@ func (aw *AppWindow) applySettingsToControls(s AppSettings) {
 	}
 	setCheck(aw.hDoH, s.DoH)
 	setCheck(aw.hBlockQUIC, s.BlockQUIC)
-	setCheck(aw.hWildCat, s.WildCat)
 	uiSendMessageFn.Call(aw.hRegion, uiCB_SETCURSEL, uintptr(regionToIndex(s.Region)), 0)
 	aw.syncMenuState(s)
 }
