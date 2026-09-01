@@ -29,10 +29,10 @@ import (
 	"syscall"
 	"time"
 
+	snwin "shortnerdcat/snc/win/windows"
 	"tunnel_cat/binlog"
 	"tunnel_cat/logevent"
 	"tunnel_cat/snc/core"
-	snwin "shortnerdcat/snc/win/windows"
 )
 
 // runAsWatchdog is called from main() when os.Args[1] == "--watchdog".
@@ -88,6 +88,22 @@ func runAsWatchdog() {
 		logevent.Emit(binlog.TagSystem, logevent.EventWinWatchdogProcess, logevent.Str(logevent.AttrStage, "main_handle_failed"))
 		return
 	}
+	mainStartedAt := time.Now()
+
+	// consecutiveFastFails / fastFailThreshold / maxConsecutiveFastFails:
+	// circuit breaker for a main process that keeps dying almost immediately
+	// after launch (e.g. losing the single-instance mutex race, or any other
+	// startup-time failure) -- without this, the loop below restarts main
+	// unconditionally forever, and each restart's main process shows its own
+	// error dialog (single_instance_conflict_msg / update_failed_msg), since
+	// those are process-local UI with no way to know a prior instance
+	// already showed the same box seconds ago. After maxConsecutiveFastFails
+	// restarts that each lived under fastFailThreshold, stop restarting --
+	// the last dialog shown stands as the user's only signal, and the
+	// watchdog exits rather than loop forever.
+	const fastFailThreshold = 10 * time.Second
+	const maxConsecutiveFastFails = 3
+	consecutiveFastFails := 0
 
 	for {
 		// Run a connectivity probe goroutine for this main instance.
@@ -161,9 +177,21 @@ func runAsWatchdog() {
 			}
 		}
 
-		close(probeStop) // tell probe goroutine to exit
+		close(probeStop)                // tell probe goroutine to exit
 		syscall.CloseHandle(mainHandle) //nolint:errcheck
 		logevent.Emit(binlog.TagSystem, logevent.EventWinWatchdogProcess, logevent.Str(logevent.AttrStage, "main_exited"))
+
+		if time.Since(mainStartedAt) < fastFailThreshold {
+			consecutiveFastFails++
+		} else {
+			consecutiveFastFails = 0
+		}
+		if consecutiveFastFails >= maxConsecutiveFastFails {
+			logevent.Emit(binlog.TagSystem, logevent.EventWinWatchdogProcess,
+				logevent.Str(logevent.AttrStage, "crash_loop_giveup"),
+				logevent.Int(logevent.AttrAttempt, int64(consecutiveFastFails)))
+			return
+		}
 
 		// If clean shutdown was signaled (either detected during the loop or now),
 		// do not restart main â€” the user intentionally quit.
@@ -193,6 +221,7 @@ func runAsWatchdog() {
 			logevent.Emit(binlog.TagSystem, logevent.EventWinWatchdogProcess, logevent.Str(logevent.AttrStage, "restart_giveup"))
 			return
 		}
+		mainStartedAt = time.Now()
 	}
 }
 
@@ -200,11 +229,11 @@ func runAsWatchdog() {
 // tunnel.  They span multiple countries and providers; if even one responds the
 // tunnel is considered healthy.  Plain HTTP is used to avoid TLS overhead.
 var connProbeSites = []string{
-	"http://example.com",       // IANA (US)
-	"http://www.google.com",    // Google (US/global)
-	"http://www.amazon.co.uk",  // Amazon (UK)
-	"http://www.naver.com",     // Naver (Korea)
-	"http://www.yahoo.co.jp",   // Yahoo Japan
+	"http://example.com",      // IANA (US)
+	"http://www.google.com",   // Google (US/global)
+	"http://www.amazon.co.uk", // Amazon (UK)
+	"http://www.naver.com",    // Naver (Korea)
+	"http://www.yahoo.co.jp",  // Yahoo Japan
 }
 
 // runConnectivityProbe probes external connectivity every 5 s while the tunnel
