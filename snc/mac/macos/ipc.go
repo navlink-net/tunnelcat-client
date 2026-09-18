@@ -77,6 +77,21 @@ type IPCMsg struct {
 	// but a permanently-zero, never-updated counter.
 	BytesSent int64 `json:"bytes_sent,omitempty"`
 	BytesRecv int64 `json:"bytes_recv,omitempty"`
+
+	// "log_upload_pref" — daemon reports this account's current log-upload
+	// preference (see core.LogUploader.GetPref/SetPref,
+	// docs/LOG_UPLOAD_PRIVACY.md), sent after a successful SetPref and once
+	// shortly after connect. Field names mirror core.LogUploadPrefResponse.
+	// LogUploadOK is true only when the arbiter actually answered. false
+	// (the daemon couldn't reach the arbiter -- no live tunnel dialer, or
+	// the request failed) tells the window to revert its optimistically-
+	// flipped checkbox to the last confirmed value instead of leaving the
+	// UI showing a change the server never accepted.
+	LogUploadOK            bool `json:"log_upload_ok,omitempty"`
+	LogUploadEnabled       bool `json:"log_upload_enabled,omitempty"`
+	LogUploadEffective     bool `json:"log_upload_effective,omitempty"`
+	LogUploadAdminDisabled bool `json:"log_upload_admin_disabled,omitempty"`
+	LogUploadGlobalEnabled bool `json:"log_upload_global_enabled,omitempty"`
 }
 
 // IPCCmd is sent from the tray (user) process to the main (root/VPN) process.
@@ -107,6 +122,12 @@ type IPCCmd struct {
 	// server-side gate as every other client -- the tray hiding/graying the
 	// menu is a UI nicety, not the actual enforcement).
 	PreviewTheme string `json:"preview_theme,omitempty"`
+
+	// "log_upload_pref" — tray forwards the Settings-panel log-upload
+	// checkbox toggle; the daemon holds the tunnel dialer needed to reach
+	// the arbiter, same reasoning as "recommend" above. See
+	// docs/LOG_UPLOAD_PRIVACY.md.
+	LogUploadEnabled bool `json:"log_upload_enabled,omitempty"`
 }
 
 // IPCConn wraps a net.Conn with line-delimited JSON encoding.

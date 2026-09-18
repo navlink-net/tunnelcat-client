@@ -20,6 +20,8 @@ struct IPCCommand: Codable {
         case setWildcat  // value = true/false
         case reconnect   // trigger pool rebuild
         case setWildcatToken  // token = WildCat access token string
+        case getLogUploadPref // fetch this account's log-upload preference (see docs/LOG_UPLOAD_PRIVACY.md)
+        case setLogUploadPref // value = true/false; set this account's own preference
     }
 
     init(cmd: Command, value: Bool? = nil, token: String? = nil) {
@@ -32,6 +34,36 @@ struct IPCCommand: Codable {
     static func setWildcat(_ on: Bool)   -> IPCCommand { .init(cmd: .setWildcat, value: on)   }
     static func reconnect()              -> IPCCommand { .init(cmd: .reconnect)               }
     static func setWildcatToken(_ t: String)  -> IPCCommand { .init(cmd: .setWildcatToken, token: t)    }
+    static func getLogUploadPref()       -> IPCCommand { .init(cmd: .getLogUploadPref)        }
+    static func setLogUploadPref(_ on: Bool) -> IPCCommand { .init(cmd: .setLogUploadPref, value: on) }
+}
+
+/// Reply to getLogUploadPref/setLogUploadPref -- mirrors
+/// tunnel_cat/snc/core.LogUploadPrefResponse (same field names as the Go
+/// JSON, see lib_ios.go's SNCGetLogUploadPref). Deliberately NOT folded
+/// into IPCReply: that type is fixed-shape tunnel status, and adding an
+/// unrelated account-preference payload to it would make every existing
+/// status decode path carry fields it never uses.
+struct LogUploadPrefReply: Codable {
+    /// True only when the arbiter actually answered. An all-false reply with
+    /// ok == false means "couldn't reach the arbiter" (no live tunnel dialer
+    /// yet, or the request failed) -- explicit rather than inferred from the
+    /// other fields, because an all-false reply with ok == true is also a
+    /// real, legitimate state (global kill switch off AND this user opted
+    /// out), and the two must not be confused.
+    let ok: Bool
+    let enabled: Bool        // this account's own preference
+    let adminDisabled: Bool  // staff override, if any
+    let globalEnabled: Bool  // system-wide kill switch
+    let effective: Bool      // what actually happens right now (AND of all three)
+
+    enum CodingKeys: String, CodingKey {
+        case ok
+        case enabled
+        case adminDisabled = "admin_disabled"
+        case globalEnabled = "global_enabled"
+        case effective
+    }
 }
 
 // ── Extension → App ───────────────────────────────────────────────────────────
@@ -71,4 +103,5 @@ enum SharedDefaultsKey {
     static let tunnelState   = "snc_tunnel_state"        // last-known state string
     static let wildcatToken       = "snc_wildcat_token"            // String: WildCat access token
     static let wildcatTokenExpiry = "snc_wildcat_token_expiry"     // Double: timeIntervalSince1970
+    static let logUploadCache = "snc_log_upload_cache"   // Bool: last-known log-upload preference (see docs/LOG_UPLOAD_PRIVACY.md); absent = never fetched, treated as true
 }

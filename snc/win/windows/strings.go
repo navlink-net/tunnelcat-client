@@ -117,6 +117,7 @@ var stringsEN = map[string]string{
 	"label_your_location":         "Your location (where you are):",
 	"section_connection_options":  "CONNECTION OPTIONS",
 	"checkbox_doh":                "Use DNS over HTTPS",
+	"checkbox_log_upload":         "Send diagnostic logs to support automatically",
 	"badge_cat_club_member":       "Cat Club Member",
 	"badge_elite_cat_club_member": "Elite Cat Club Member",
 }
@@ -223,6 +224,7 @@ var stringsRU = map[string]string{
 	"label_your_location":         "Ваше местонахождение (где вы находитесь):",
 	"section_connection_options":  "ПАРАМЕТРЫ ПОДКЛЮЧЕНИЯ",
 	"checkbox_doh":                "Использовать DNS поверх HTTPS",
+	"checkbox_log_upload":         "Автоматически отправлять диагностические логи в поддержку",
 	"badge_cat_club_member":       "Участник Cat Club",
 	"badge_elite_cat_club_member": "Участник Elite Cat Club",
 }

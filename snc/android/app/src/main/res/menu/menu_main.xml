@@ -34,6 +34,12 @@
         app:showAsAction="never" />
 
     <item
+        android:id="@+id/menu_log_upload"
+        android:title="@string/log_upload_label"
+        android:checkable="true"
+        app:showAsAction="never" />
+
+    <item
         android:id="@+id/menu_recommend_cat_club"
         android:title="@string/recommend_cat_club"
         android:visible="false"

@@ -1896,6 +1896,28 @@ func main() {
 				return wildcatEnabledAtomic.Load()
 			},
 		)
+		// Push this account's real log-upload preference to the tray/window
+		// once the tunnel exists to ask the arbiter over -- see
+		// ipcServer.PushLogUploadPref, "log_upload_pref" case above for the
+		// write side.
+		if capturedLogUploader := logUploader; capturedLogUploader != nil {
+			go func() {
+				time.Sleep(2 * time.Second) // let dialerPool settle post-connect
+				if dialerPool == nil {
+					return
+				}
+				d := dialerPool.Pick()
+				if d == nil {
+					return
+				}
+				pref, err := capturedLogUploader.GetPref(d)
+				if err != nil {
+					core.Log.Printf("log-upload-pref: initial fetch: %v", err)
+					return
+				}
+				ipc.PushLogUploadPref(pref)
+			}()
+		}
 
 		// Connection-stats upload: same channel/cadence as log upload above,
 		// separate endpoint -- see core.ConnStatsUploader. connStatsCollector
@@ -2177,6 +2199,26 @@ func main() {
 				// re-checks isAdmin server-side and no-ops otherwise.
 				if setClubThemePreview != nil {
 					setClubThemePreview(cmd.PreviewTheme)
+				}
+
+			case "log_upload_pref":
+				// Forwarded from the Settings-panel checkbox (see
+				// docs/LOG_UPLOAD_PRIVACY.md) -- only the daemon holds the
+				// tunnel dialer needed to reach the arbiter, same reasoning
+				// as "recommend" just above.
+				if dialer == nil || logUploader == nil {
+					core.Log.Printf("log-upload-pref: no active session, dropping set enabled=%v", cmd.LogUploadEnabled)
+					ipc.PushLogUploadPrefFailed()
+				} else {
+					go func(enabled bool) {
+						pref, err := logUploader.SetPref(dialer, enabled)
+						if err != nil {
+							core.Log.Printf("log-upload-pref: set enabled=%v: %v", enabled, err)
+							ipc.PushLogUploadPrefFailed()
+							return
+						}
+						ipc.PushLogUploadPref(pref)
+					}(cmd.LogUploadEnabled)
 				}
 
 			case "key":

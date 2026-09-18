@@ -528,9 +528,64 @@ final class ConnectionViewController: UIViewController {
             self?.shareLogs()
         }
 
+        // Server-side account preference, not a local reconnect-required
+        // setting like WildCat -- see docs/LOG_UPLOAD_PRIVACY.md. Shows the
+        // last-known cached value (VPNManager.logUploadCached), kept honest
+        // by refreshLogUploadPref() on each connect.
+        let logUploadAction = UIAction(
+            title: L.t("menu.logUpload"),
+            image: UIImage(systemName: "doc.text.magnifyingglass"),
+            state: VPNManager.shared.logUploadCached ? .on : .off
+        ) { [weak self] _ in
+            self?.toggleLogUploadPref()
+        }
+
         navigationItem.rightBarButtonItem = UIBarButtonItem(
             image: UIImage(systemName: "ellipsis.circle"),
-            menu: UIMenu(children: [wildcatAction, logsAction]))
+            menu: UIMenu(children: [wildcatAction, logUploadAction, logsAction]))
+    }
+
+    /// Flips the log-upload preference: optimistic local update first (so the
+    /// menu responds immediately), then confirms with the arbiter via the
+    /// extension and reconciles -- reverting if the extension couldn't reach
+    /// the arbiter (most likely: no active tunnel yet).
+    private func toggleLogUploadPref() {
+        let newVal = !VPNManager.shared.logUploadCached
+        VPNManager.shared.logUploadCached = newVal
+        buildMenu()
+        VPNManager.shared.setLogUploadPref(newVal) { [weak self] reply in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                // nil = no session/decode failure; ok == false = the extension
+                // had no live dialer to reach the arbiter over. Either way the
+                // arbiter never confirmed the change.
+                guard let reply, reply.ok else {
+                    VPNManager.shared.logUploadCached = !newVal
+                    self.buildMenu()
+                    let alert = UIAlertController(
+                        title: nil, message: L.t("logUpload.noConnection"), preferredStyle: .alert)
+                    alert.addAction(UIAlertAction(title: "OK", style: .default))
+                    self.present(alert, animated: true)
+                    return
+                }
+                VPNManager.shared.logUploadCached = reply.enabled
+                self.buildMenu()
+            }
+        }
+    }
+
+    /// Fetches this account's real log-upload preference once a tunnel exists
+    /// to ask over (called on the connect edge in vpnStatusChanged), so the
+    /// cached menu state reflects the actual server-side value -- including
+    /// one set from another device or an admin override.
+    private func refreshLogUploadPref() {
+        VPNManager.shared.fetchLogUploadPref { [weak self] reply in
+            DispatchQueue.main.async {
+                guard let self, let reply, reply.ok else { return }
+                VPNManager.shared.logUploadCached = reply.enabled
+                self.buildMenu()
+            }
+        }
     }
 
     // MARK: - Actions
@@ -709,6 +764,7 @@ final class ConnectionViewController: UIViewController {
             // starts/stops the live traffic counter in step with it.
             if status == .connected && self.lastKnownStatus != .connected {
                 self.triggerConnectHaptic()
+                self.refreshLogUploadPref()
             }
             if status == .connected {
                 self.startTrafficTimer()

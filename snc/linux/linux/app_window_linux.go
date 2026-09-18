@@ -35,6 +35,7 @@ import "C"
 import (
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"sync"
 	"unsafe"
@@ -55,6 +56,13 @@ type AppWindowCallbacks struct {
 	// key?" prompt. true -> key-entry panel; false -> credential-login panel
 	// (if navlink.net was reachable) or key-entry panel otherwise.
 	OnHaveKeyAnswer func(hasKey bool)
+	// OnLogUploadToggle fires when the user flips the Settings panel's "send
+	// diagnostic logs" checkbox. Deliberately separate from OnSettings: this
+	// preference lives on the account server-side
+	// (core.LogUploader.GetPref/SetPref), not in local AppSettings, and
+	// setting it requires a live tunnel dialer -- see
+	// docs/LOG_UPLOAD_PRIVACY.md.
+	OnLogUploadToggle func(enabled bool)
 	// OnCredentialLogin fires when the user submits email+password on the
 	// credential-login panel. The callback is responsible for calling
 	// navlinkauth and, on success, feeding the resulting key into the same
@@ -129,6 +137,21 @@ func (w *AppWindow) PushStatus(s AppStatus) {
 func (w *AppWindow) PushSettings(s AppSettings) {
 	b, _ := json.Marshal(s)
 	w.RunJS("if(window.onSettingsUpdate)window.onSettingsUpdate(" + string(b) + ")")
+}
+
+// PushLogUploadPref sends this account's current log-upload preference (plus
+// ok) to the window's JS, so the Settings panel checkbox reflects the real
+// server-side value (see core.LogUploader.GetPref). ok == false means the
+// daemon couldn't reach the arbiter (no live tunnel, or the request failed)
+// -- the JS side reverts its optimistically-flipped checkbox to the last
+// confirmed value instead of leaving the UI showing a change the server
+// never accepted; p is ignored in that case.
+func (w *AppWindow) PushLogUploadPref(ok bool, p core.LogUploadPrefResponse) {
+	b, _ := json.Marshal(struct {
+		OK bool `json:"ok"`
+		core.LogUploadPrefResponse
+	}{OK: ok, LogUploadPrefResponse: p})
+	w.RunJS("if(window.onLogUploadPrefUpdate)window.onLogUploadPrefUpdate(" + string(b) + ")")
 }
 
 // PushClubTheme sends the current club theme + header badge text + live
@@ -219,6 +242,17 @@ func goAppWinPageReady() {
 	if globalAppWin != nil && globalAppWin.cbs.OnPageReady != nil {
 		go globalAppWin.cbs.OnPageReady()
 	}
+}
+
+//export goAppWinLogUploadPref
+func goAppWinLogUploadPref(enabled C.int) {
+	logevent.Emit(binlog.TagSystem, logevent.EventLinuxDialogAction,
+		logevent.Str(logevent.AttrAction, "log_upload_toggle"),
+		logevent.Str(logevent.AttrDetail, fmt.Sprintf("enabled=%v", enabled != 0)))
+	if globalAppWin == nil || globalAppWin.cbs.OnLogUploadToggle == nil {
+		return
+	}
+	go globalAppWin.cbs.OnLogUploadToggle(enabled != 0)
 }
 
 //export goAppWinKey
@@ -633,6 +667,13 @@ body{
           <input type="checkbox" id="s-block-quic" onchange="saveSettings()">
         </div>
       </div>
+      <div class="settings-section">
+        <h3>{{T:privacy_heading}}</h3>
+        <div class="srow">
+          <div class="srow-label">{{T:log_upload_label}}</div>
+          <input type="checkbox" id="s-log-upload" onchange="setLogUploadPref()">
+        </div>
+      </div>
       <div class="settings-section" id="club-theme-section" style="display:none">
         <h3>{{T:club_theme_heading}}</h3>
         <div class="srow">
@@ -952,6 +993,26 @@ window.onSettingsUpdate = function(s) {
   // so it reads correctly again the moment WildCat releases the lock).
   document.getElementById('s-block-quic-row').style.display = s.quicLocked ? 'none' : '';
 };
+
+// Log-upload preference lives on the account server-side (see
+// docs/LOG_UPLOAD_PRIVACY.md), not in local AppSettings -- separate
+// send/receive functions from saveSettings()/onSettingsUpdate above.
+var lastLogUploadPref = true; // last value the arbiter actually confirmed (server-side default: on)
+function setLogUploadPref() {
+  window.webkit.messageHandlers.sncSetLogUploadPref.postMessage(
+    document.getElementById('s-log-upload').checked);
+}
+window.onLogUploadPrefUpdate = function(p) {
+  var el = document.getElementById('s-log-upload');
+  if (p.ok) {
+    lastLogUploadPref = !!p.enabled;
+  }
+  // ok=false: the daemon couldn't reach the arbiter (no live tunnel, or the
+  // request failed) -- revert the optimistically-flipped checkbox to the
+  // last confirmed value rather than leave it showing an unaccepted change.
+  el.checked = lastLogUploadPref;
+};
+
 window.webkit.messageHandlers.sncPageReady.postMessage({});
 </script>
 </body>

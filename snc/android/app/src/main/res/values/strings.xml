@@ -55,6 +55,8 @@
     <string name="disable_udp_tunnel">Disable UDP tunnel</string>
     <string name="disable_quic">Disable QUIC</string>
     <string name="disable_bypass">Disable regional bypass</string>
+    <string name="log_upload_label">Send diagnostic logs to support automatically</string>
+    <string name="log_upload_pref_no_connection">Connect first to change this setting</string>
     <string name="reconnect_for_changes">Reconnect for changes to take effect</string>
     <string name="update_ready">Update ready — install</string>
     <string name="update_dialog_title">Update available</string>

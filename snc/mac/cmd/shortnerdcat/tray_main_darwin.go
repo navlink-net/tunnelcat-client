@@ -195,6 +195,9 @@ func runTrayProcess(socketPath string, watchdogRestart bool) {
 		appWin.SetClubThemePreviewCallback(func(theme string) {
 			sendCmd(snmac.IPCCmd{T: "club_theme_preview", PreviewTheme: theme})
 		})
+		appWin.SetLogUploadToggleCallback(func(enabled bool) {
+			sendCmd(snmac.IPCCmd{T: "log_upload_pref", LogUploadEnabled: enabled})
+		})
 		fmt.Fprintf(os.Stderr, "tray: calling appWin.PushStatus\n")
 		appWin.PushStatus(trayApp.GetAppStatus())
 		fmt.Fprintf(os.Stderr, "tray: calling appWin.Show\n")
@@ -263,6 +266,15 @@ func runTrayProcess(socketPath string, watchdogRestart bool) {
 			case "bytes":
 				if appWin != nil {
 					appWin.PushBytes(msg.BytesSent, msg.BytesRecv)
+				}
+			case "log_upload_pref":
+				if appWin != nil {
+					appWin.PushLogUploadPref(msg.LogUploadOK, core.LogUploadPrefResponse{
+						Enabled:       msg.LogUploadEnabled,
+						Effective:     msg.LogUploadEffective,
+						AdminDisabled: msg.LogUploadAdminDisabled,
+						GlobalEnabled: msg.LogUploadGlobalEnabled,
+					})
 				}
 			case "wildcat_status":
 				// Daemon reports WildCat relay connect result.

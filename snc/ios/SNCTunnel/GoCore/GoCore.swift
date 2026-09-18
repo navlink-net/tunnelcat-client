@@ -70,6 +70,26 @@ enum GoCore {
     static func reconnect() {
         SNCReconnect()
     }
+
+    // MARK: - Log-upload preference
+
+    /// Fetches this account's log-upload preference from the arbiter, as raw
+    /// JSON bytes for passing straight back through handleAppMessage. All
+    /// fields false when there's no live tunnel yet -- see lib_ios.go's
+    /// SNCGetLogUploadPref and docs/LOG_UPLOAD_PRIVACY.md.
+    static func logUploadPrefData() -> Data? {
+        guard let cStr = SNCGetLogUploadPref() else { return nil }
+        defer { SNCFreeString(cStr) }
+        return Data(String(cString: cStr).utf8)
+    }
+
+    /// Sets this account's own log-upload preference and returns the
+    /// resulting state as raw JSON bytes (same shape as logUploadPrefData).
+    static func setLogUploadPrefData(_ enabled: Bool) -> Data? {
+        guard let cStr = SNCSetLogUploadPref(enabled ? 1 : 0) else { return nil }
+        defer { SNCFreeString(cStr) }
+        return Data(String(cString: cStr).utf8)
+    }
 }
 
 // MARK: - Status model

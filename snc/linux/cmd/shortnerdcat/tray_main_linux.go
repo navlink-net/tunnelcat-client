@@ -140,6 +140,9 @@ func runTrayProcess(socketPath string, watchdogRestart bool) {
 			// User submitted an activation key from the window's login panel.
 			sendCmd(snmac.IPCCmd{T: "key", Key: keyStr})
 		},
+		OnLogUploadToggle: func(enabled bool) {
+			sendCmd(snmac.IPCCmd{T: "log_upload_pref", LogUploadEnabled: enabled})
+		},
 		OnHaveKeyAnswer: func(hasKey bool) {
 			// No daemon-side action needed -- the window's own JS already
 			// switched to the right screen (key entry or credential login).
@@ -249,6 +252,16 @@ func runTrayProcess(socketPath string, watchdogRestart bool) {
 			case "bytes":
 				if appWin != nil {
 					appWin.PushBytes(msg.BytesSent, msg.BytesRecv)
+				}
+
+			case "log_upload_pref":
+				if appWin != nil {
+					appWin.PushLogUploadPref(msg.LogUploadOK, core.LogUploadPrefResponse{
+						Enabled:       msg.LogUploadEnabled,
+						Effective:     msg.LogUploadEffective,
+						AdminDisabled: msg.LogUploadAdminDisabled,
+						GlobalEnabled: msg.LogUploadGlobalEnabled,
+					})
 				}
 			}
 		}

@@ -154,6 +154,17 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                 os_log("handleAppMessage: setWildcatToken — empty token ignored", log: log, type: .info)
             }
             completionHandler?(GoCore.statusData())
+
+        case .getLogUploadPref:
+            // Reply is a LogUploadPrefReply (see IPCProtocol.swift), not an
+            // IPCReply -- the caller decodes accordingly. See
+            // docs/LOG_UPLOAD_PRIVACY.md.
+            completionHandler?(GoCore.logUploadPrefData())
+
+        case .setLogUploadPref:
+            let on = cmd.value ?? false
+            os_log("handleAppMessage: setLogUploadPref=%d", log: log, type: .info, on ? 1 : 0)
+            completionHandler?(GoCore.setLogUploadPrefData(on))
         }
     }
 

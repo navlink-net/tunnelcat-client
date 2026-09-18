@@ -2254,6 +2254,12 @@ func main() {
 		dataDir:            dataDir,
 		connStatsCollector: connStatsCollector,
 		club:               clubSt,
+		pickDialer: func() *snc.TunnelDialer {
+			if pool == nil {
+				return nil
+			}
+			return pool.Pick()
+		},
 	}
 
 	if ipcSock != "" {
@@ -2355,6 +2361,11 @@ type runState struct {
 	dataDir            string
 	connStatsCollector *snc.ConnStatsCollector
 	club               *clubState
+	// pickDialer is the same closure passed to androidcore.NewLogUploader(...).Start
+	// below -- stored here so the "log-upload-pref-get"/"log-upload-pref-set"
+	// IPC commands can reach the arbiter the same way the periodic upload
+	// does. See docs/LOG_UPLOAD_PRIVACY.md.
+	pickDialer func() *snc.TunnelDialer
 }
 
 // clubState mirrors the Cat Club / Elite Cat Club UI state that the Windows
@@ -2704,6 +2715,49 @@ func handleConn(conn net.Conn, st *runState) {
 		}
 		snc.Log.Printf("club-recommend: recommended %s for Cat Club", args.Username)
 		androidcore.WriteJSON(conn, androidcore.Response{OK: true}) //nolint:errcheck
+	case "log-upload-pref-get":
+		// Polled by Kotlin (menu opens / periodically) to show the current
+		// state of the "send diagnostic logs" checkable menu item -- see
+		// docs/LOG_UPLOAD_PRIVACY.md. Empty response (all false) when there's
+		// no live tunnel to ask the arbiter over, same convention as
+		// ClubStatusResponse.
+		dialer := st.pickDialer()
+		if dialer == nil {
+			androidcore.WriteJSON(conn, androidcore.LogUploadPrefResponse{}) //nolint:errcheck
+			break
+		}
+		pref, err := androidcore.NewLogUploader(st.nodeID).GetPref(dialer)
+		if err != nil {
+			snc.Log.Printf("log-upload-pref-get: %v", err)
+			androidcore.WriteJSON(conn, androidcore.LogUploadPrefResponse{}) //nolint:errcheck
+			break
+		}
+		androidcore.WriteJSON(conn, androidcore.LogUploadPrefResponse{ //nolint:errcheck
+			OK: true, Enabled: pref.Enabled, AdminDisabled: pref.AdminDisabled,
+			GlobalEnabled: pref.GlobalEnabled, Effective: pref.Effective,
+		})
+	case "log-upload-pref-set":
+		// User toggled the "send diagnostic logs" checkable menu item.
+		var args androidcore.LogUploadPrefArgs
+		if len(cmd.Args) > 0 {
+			json.Unmarshal(cmd.Args, &args) //nolint:errcheck
+		}
+		dialer := st.pickDialer()
+		if dialer == nil {
+			snc.Log.Printf("log-upload-pref-set: no active session, dropping set enabled=%v", args.Enabled)
+			androidcore.WriteJSON(conn, androidcore.LogUploadPrefResponse{}) //nolint:errcheck
+			break
+		}
+		pref, err := androidcore.NewLogUploader(st.nodeID).SetPref(dialer, args.Enabled)
+		if err != nil {
+			snc.Log.Printf("log-upload-pref-set: enabled=%v: %v", args.Enabled, err)
+			androidcore.WriteJSON(conn, androidcore.LogUploadPrefResponse{}) //nolint:errcheck
+			break
+		}
+		androidcore.WriteJSON(conn, androidcore.LogUploadPrefResponse{ //nolint:errcheck
+			OK: true, Enabled: pref.Enabled, AdminDisabled: pref.AdminDisabled,
+			GlobalEnabled: pref.GlobalEnabled, Effective: pref.Effective,
+		})
 	case "stop":
 		androidcore.WriteJSON(conn, androidcore.Response{OK: true}) //nolint:errcheck
 		conn.Close()

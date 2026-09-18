@@ -110,6 +110,7 @@ class MainActivity : AppCompatActivity() {
                 // tab flashing open even when acquireTokenSilently() never touched it.
                 val frag = supportFragmentManager.findFragmentByTag("f2") as? BrowseFragment
                 frag?.onVpnConnected()
+                refreshLogUploadPref()
             } else if (!running && vpnWasRunning) {
                 // Just disconnected — reset browse proxy state so pages load directly.
                 val frag = supportFragmentManager.findFragmentByTag("f2") as? BrowseFragment
@@ -310,6 +311,13 @@ menu.findItem(R.id.menu_wildcat)?.isChecked = wildcatOn
             isVisible = true
             isChecked = prefs.getBoolean("disable_bypass", false)
         }
+        // Server-side account preference, not a local reconnect-required
+        // setting like the ones above -- see docs/LOG_UPLOAD_PRIVACY.md.
+        // Shows the last known value immediately; refreshLogUploadPref()
+        // (called once per connect, see vpnStateReceiver) keeps the cache
+        // honest without a network round-trip on every menu open.
+        menu.findItem(R.id.menu_log_upload)?.isChecked =
+            prefs.getBoolean("log_upload_enabled_cache", true)
         val version = UpdateChecker.readyVersion(this)
         menu.findItem(R.id.menu_update)?.apply {
             isVisible = updateReady && version != null
@@ -388,6 +396,33 @@ menu.findItem(R.id.menu_wildcat)?.isChecked = wildcatOn
                 prefs.edit().putBoolean("disable_bypass", newVal).apply()
                 if (SNCVpnService.isRunning) {
                     Toast.makeText(this, getString(R.string.reconnect_for_changes), Toast.LENGTH_SHORT).show()
+                }
+                true
+            }
+            R.id.menu_log_upload -> {
+                val newVal = !item.isChecked
+                item.isChecked = newVal
+                prefs.edit().putBoolean("log_upload_enabled_cache", newVal).apply()
+                lifecycleScope.launch {
+                    val resp = withContext(Dispatchers.IO) {
+                        SNCVpnService.sendIpcWithResponse(
+                            """{"cmd":"log-upload-pref-set","args":{"enabled":$newVal}}""",
+                            "log-upload-pref-set"
+                        )
+                    }
+                    val json = resp?.let { runCatching { JSONObject(it) }.getOrNull() }
+                    // "ok" is explicit: an all-false reply with ok=false means
+                    // the arbiter never answered (no live tunnel yet) -- NOT the
+                    // same thing as a real all-false reply (ok=true).
+                    if (json == null || !json.optBoolean("ok", false)) {
+                        Toast.makeText(this@MainActivity, getString(R.string.log_upload_pref_no_connection), Toast.LENGTH_SHORT).show()
+                        // Revert the optimistic local flip -- the daemon never
+                        // confirmed it (most likely: no active tunnel session).
+                        prefs.edit().putBoolean("log_upload_enabled_cache", !newVal).apply()
+                        invalidateOptionsMenu()
+                    } else {
+                        prefs.edit().putBoolean("log_upload_enabled_cache", json.optBoolean("enabled", newVal)).apply()
+                    }
                 }
                 true
             }
@@ -612,6 +647,28 @@ menu.findItem(R.id.menu_wildcat)?.isChecked = wildcatOn
     // Applies instantly: no tunnel/connection required, no round-trip. The
     // chevron itself is drawn as an overlay on the illustration by
     // ConnectionFragment (which re-reads ClubStatus every 2s), not here.
+    // refreshLogUploadPref fetches this account's real log-upload preference
+    // from the arbiter once a tunnel exists to ask over (see
+    // docs/LOG_UPLOAD_PRIVACY.md), so the menu checkbox reflects the actual
+    // server-side value -- including one set from a different device, or an
+    // admin override -- rather than only whatever was last toggled here.
+    // Called once per connect (vpnStateReceiver); the checkbox itself always
+    // reads the cached prefs value (see onPrepareOptionsMenu), so this just
+    // needs to update that cache and invalidate the menu.
+    private fun refreshLogUploadPref() {
+        lifecycleScope.launch {
+            val resp = withContext(Dispatchers.IO) {
+                SNCVpnService.sendIpcWithResponse("""{"cmd":"log-upload-pref-get"}""", "log-upload-pref-get")
+            }
+            val json = resp?.let { runCatching { JSONObject(it) }.getOrNull() } ?: return@launch
+            if (!json.optBoolean("ok", false)) return@launch // arbiter didn't answer -- keep the cached value
+            getSharedPreferences("snc", MODE_PRIVATE).edit()
+                .putBoolean("log_upload_enabled_cache", json.optBoolean("enabled", true))
+                .apply()
+            invalidateOptionsMenu()
+        }
+    }
+
     private fun setClubThemePreview(theme: String) {
         ClubStatus.setPreview(this, theme)
         invalidateOptionsMenu()

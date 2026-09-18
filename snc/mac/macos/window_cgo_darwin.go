@@ -66,6 +66,12 @@ func windowPushSettings(b []byte) {
 	C.free(unsafe.Pointer(cs))
 }
 
+func windowPushLogUploadPref(b []byte) {
+	cs := C.CString(string(b))
+	C.snc_window_push_log_upload_pref(cs)
+	C.free(unsafe.Pointer(cs))
+}
+
 func windowPushClubTheme(b []byte) {
 	cs := C.CString(string(b))
 	C.snc_window_push_club_theme(cs)
@@ -134,6 +140,14 @@ func go_snc_set_settings(jsonStr *C.char) {
 		return
 	}
 	go globalWindow.onSettings(s)
+}
+
+//export go_snc_set_log_upload_pref
+func go_snc_set_log_upload_pref(enabled C.int) {
+	if globalWindow == nil || globalWindow.onLogUploadToggle == nil {
+		return
+	}
+	go globalWindow.onLogUploadToggle(enabled != 0)
 }
 
 //export go_snc_recommend

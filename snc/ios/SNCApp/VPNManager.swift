@@ -121,6 +121,49 @@ final class VPNManager {
         send(.status(), completion: completion)
     }
 
+    // MARK: - Log-upload preference (see docs/LOG_UPLOAD_PRIVACY.md)
+
+    /// Like send(_:completion:) but decodes a LogUploadPrefReply -- that reply
+    /// is an unrelated account-preference payload, not tunnel status, so it
+    /// deliberately doesn't share IPCReply's fixed shape.
+    private func sendLogUploadPref(_ cmd: IPCCommand, completion: @escaping (LogUploadPrefReply?) -> Void) {
+        guard let session = manager?.connection as? NETunnelProviderSession,
+              let data = try? JSONEncoder().encode(cmd) else {
+            log.error("sendLogUploadPref: no active session or encode failed for cmd=\(cmd.cmd.rawValue, privacy: .public)")
+            completion(nil)
+            return
+        }
+        do {
+            try session.sendProviderMessage(data) { replyData in
+                guard let d = replyData,
+                      let reply = try? JSONDecoder().decode(LogUploadPrefReply.self, from: d) else {
+                    self.log.error("sendLogUploadPref: no reply or decode failed for cmd=\(cmd.cmd.rawValue, privacy: .public)")
+                    completion(nil)
+                    return
+                }
+                completion(reply)
+            }
+        } catch {
+            log.error("sendLogUploadPref: sendProviderMessage failed: \(error.localizedDescription, privacy: .public)")
+            completion(nil)
+        }
+    }
+
+    /// Fetches this account's current log-upload preference from the arbiter
+    /// via the extension. nil when there's no active tunnel session to ask
+    /// over; an all-false reply means the extension couldn't reach the
+    /// arbiter yet.
+    func fetchLogUploadPref(completion: @escaping (LogUploadPrefReply?) -> Void) {
+        sendLogUploadPref(.getLogUploadPref(), completion: completion)
+    }
+
+    /// Sets this account's own log-upload preference (see
+    /// docs/LOG_UPLOAD_PRIVACY.md) via the extension and returns the
+    /// resulting state.
+    func setLogUploadPref(_ on: Bool, completion: @escaping (LogUploadPrefReply?) -> Void) {
+        sendLogUploadPref(.setLogUploadPref(on), completion: completion)
+    }
+
     // MARK: - Settings
 
     func saveKey(_ key: String) {
@@ -141,6 +184,16 @@ final class VPNManager {
 
     var wildcatEnabled: Bool {
         shared.bool(forKey: SharedDefaultsKey.wildcatOn)
+    }
+
+    /// Last-known log-upload preference (see docs/LOG_UPLOAD_PRIVACY.md), so
+    /// the menu can show something immediately without a network round-trip.
+    /// Defaults to true when never fetched, matching the server-side default
+    /// (nothing changes for anyone until someone actively flips a switch).
+    /// Kept honest by fetchLogUploadPref, called once per connect.
+    var logUploadCached: Bool {
+        get { shared.object(forKey: SharedDefaultsKey.logUploadCache) as? Bool ?? true }
+        set { shared.set(newValue, forKey: SharedDefaultsKey.logUploadCache) }
     }
 
     // MARK: - WildCat Token

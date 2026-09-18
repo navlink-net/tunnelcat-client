@@ -17,6 +17,7 @@ extern void goAppWinSettings(char *json);
 extern void goAppWinPageReady(void);
 extern void goAppWinKey(char *key);
 extern void goAppWinHaveKeyAnswer(int hasKey);
+extern void goAppWinLogUploadPref(int enabled);
 extern void goAppWinCredentialLogin(char *json);
 extern void goAppWinKeyModeSwitch(void);
 extern void goAppWinRecommend(char *username);
@@ -72,6 +73,11 @@ static void on_wv_have_key_answer(WebKitUserContentManager *m, WebKitJavascriptR
 	JSCValue *v = webkit_javascript_result_get_js_value(r);
 	goAppWinHaveKeyAnswer(jsc_value_to_boolean(v) ? 1 : 0);
 }
+static void on_wv_log_upload_pref(WebKitUserContentManager *m, WebKitJavascriptResult *r, gpointer d) {
+	(void)m; (void)d;
+	JSCValue *v = webkit_javascript_result_get_js_value(r);
+	goAppWinLogUploadPref(jsc_value_to_boolean(v) ? 1 : 0);
+}
 static void on_wv_credential_login(WebKitUserContentManager *m, WebKitJavascriptResult *r, gpointer d) {
 	(void)m; (void)d;
 	JSCValue *v = webkit_javascript_result_get_js_value(r);
@@ -121,6 +127,7 @@ static gboolean app_win_create_idle(gpointer data) {
 	webkit_user_content_manager_register_script_message_handler(ucm, "sncPageReady");
 	webkit_user_content_manager_register_script_message_handler(ucm, "sncKey");
 	webkit_user_content_manager_register_script_message_handler(ucm, "sncHaveKeyAnswer");
+	webkit_user_content_manager_register_script_message_handler(ucm, "sncSetLogUploadPref");
 	webkit_user_content_manager_register_script_message_handler(ucm, "sncCredentialLogin");
 	webkit_user_content_manager_register_script_message_handler(ucm, "sncKeyModeSwitch");
 	webkit_user_content_manager_register_script_message_handler(ucm, "sncRecommend");
@@ -131,6 +138,7 @@ static gboolean app_win_create_idle(gpointer data) {
 	g_signal_connect(ucm, "script-message-received::sncPageReady",   G_CALLBACK(on_wv_page_ready), NULL);
 	g_signal_connect(ucm, "script-message-received::sncKey",         G_CALLBACK(on_wv_key),        NULL);
 	g_signal_connect(ucm, "script-message-received::sncHaveKeyAnswer",  G_CALLBACK(on_wv_have_key_answer),  NULL);
+	g_signal_connect(ucm, "script-message-received::sncSetLogUploadPref", G_CALLBACK(on_wv_log_upload_pref), NULL);
 	g_signal_connect(ucm, "script-message-received::sncCredentialLogin", G_CALLBACK(on_wv_credential_login), NULL);
 	g_signal_connect(ucm, "script-message-received::sncKeyModeSwitch", G_CALLBACK(on_wv_key_mode_switch), NULL);
 	g_signal_connect(ucm, "script-message-received::sncRecommend",     G_CALLBACK(on_wv_recommend),       NULL);

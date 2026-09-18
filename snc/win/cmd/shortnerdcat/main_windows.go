@@ -2811,6 +2811,28 @@ func main() {
 				return trayApp != nil && trayApp.IsWildcatEnabled()
 			},
 		)
+		// Populate the Settings-tab checkbox with this account's real
+		// preference now that a tunnel exists to ask the arbiter over --
+		// see appWindow.LogUploadToggleFn for the write side.
+		if appWindow != nil {
+			capturedLogUploader := logUploader
+			go func() {
+				time.Sleep(2 * time.Second) // let dialerPool settle post-connect
+				if dialerPool == nil {
+					return
+				}
+				dialer := dialerPool.Pick()
+				if dialer == nil {
+					return
+				}
+				pref, err := capturedLogUploader.GetPref(dialer)
+				if err != nil {
+					core.Log.Printf("log-upload-pref: initial fetch: %v", err)
+					return
+				}
+				appWindow.SetLogUploadCheck(pref.Enabled)
+			}()
+		}
 
 		// Connection-stats upload: same channel/cadence as log upload above,
 		// separate endpoint -- see core.ConnStatsUploader. connStatsCollector
@@ -3227,6 +3249,29 @@ func main() {
 	appWindow.StatusFn = func() snwin.AppStatus { return trayApp.GetAppStatus() }
 	appWindow.GetSettingsFn = func() snwin.AppSettings { return trayApp.GetAppSettings() }
 	appWindow.SetSettingsFn = func(s snwin.AppSettings) { trayApp.ApplyWindowSettings(s) }
+	appWindow.LogUploadToggleFn = func(enabled bool) {
+		// The native auto-checkbox already flipped itself when the user
+		// clicked it -- on any failure below the arbiter never accepted the
+		// change, so revert it rather than leave the UI showing a state the
+		// server doesn't have.
+		if logUploader == nil || dialerPool == nil {
+			appWindow.SetLogUploadCheck(!enabled)
+			return
+		}
+		dialer := dialerPool.Pick()
+		if dialer == nil {
+			core.Log.Printf("log-upload-pref: cannot set (not connected)")
+			appWindow.SetLogUploadCheck(!enabled)
+			return
+		}
+		pref, err := logUploader.SetPref(dialer, enabled)
+		if err != nil {
+			core.Log.Printf("log-upload-pref: set enabled=%v: %v", enabled, err)
+			appWindow.SetLogUploadCheck(!enabled)
+			return
+		}
+		appWindow.SetLogUploadCheck(pref.Enabled) // reconcile with what the server actually has
+	}
 	appWindow.LoginFn = func() { trayApp.TriggerLogin() }
 	appWindow.LogoutFn = func() { trayApp.TriggerLogout() }
 	appWindow.AboutFn = func() { trayApp.ShowAbout() }

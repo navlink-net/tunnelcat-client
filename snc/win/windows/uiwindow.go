@@ -200,6 +200,7 @@ const (
 	uiIDRegion      = 107
 	uiIDBlockQUIC   = 108
 	uiIDByteCounter = 110
+	uiIDLogUpload   = 111
 
 	// Native menu-bar item IDs (separate range from control IDs above so
 	// WM_COMMAND dispatch never collides between a button/checkbox and a
@@ -409,6 +410,7 @@ type AppWindow struct {
 	hRegion     uintptr // region combobox
 	hDoH        uintptr // native checkboxes on Settings tab
 	hBlockQUIC  uintptr
+	hLogUpload  uintptr // account-level, not part of AppSettings -- see LogUploadToggleFn
 	hBytesLabel uintptr // uplink/downlink counter, above the tunnel status bar; see UpdateBytes
 
 	// State â€” updated from any goroutine, read in WndProc (always on runLoop thread)
@@ -428,7 +430,14 @@ type AppWindow struct {
 	StatusFn      func() AppStatus
 	GetSettingsFn func() AppSettings
 	SetSettingsFn func(AppSettings)
-	LoginFn       func()
+	// LogUploadToggleFn is called with the new checked state when the user
+	// flips the Settings-tab log-upload checkbox. Deliberately separate from
+	// GetSettingsFn/SetSettingsFn: this preference lives on the account
+	// server-side (core.LogUploader.SetPref), not in the local settings
+	// file, and setting it requires a live tunnel dialer -- see
+	// docs/LOG_UPLOAD_PRIVACY.md. May be nil before login/first connect.
+	LogUploadToggleFn func(enabled bool)
+	LoginFn           func()
 	LogoutFn      func()
 	AboutFn       func()
 	UpdateFn      func()
@@ -998,6 +1007,16 @@ func (aw *AppWindow) handleCommand(id, notif uint16) {
 				logevent.Str(logevent.AttrDetail, fmt.Sprintf("id=%d", id)))
 			go aw.saveSettings()
 		}
+	case uiIDLogUpload:
+		if notif == uiBN_CLICKED {
+			checked := checkboxChecked(aw.hLogUpload)
+			logevent.Emit(binlog.TagSystem, logevent.EventWinUiwindowMenu,
+				logevent.Str(logevent.AttrAction, "log_upload_toggle"),
+				logevent.Str(logevent.AttrDetail, fmt.Sprintf("enabled=%v", checked)))
+			if aw.LogUploadToggleFn != nil {
+				go aw.LogUploadToggleFn(checked)
+			}
+		}
 	case uiIDRegion:
 		if notif == uiCBN_SELCHANGE {
 			logevent.Emit(binlog.TagSystem, logevent.EventWinUiwindowMenu, logevent.Str(logevent.AttrAction, "region_combo"))
@@ -1172,6 +1191,7 @@ func (aw *AppWindow) syncTabControls() {
 	showIf(aw.hRegion, settings)
 	showIf(aw.hDoH, settings)
 	showIf(aw.hBlockQUIC, settings)
+	showIf(aw.hLogUpload, settings)
 	if tunnel {
 		aw.syncConnectButtons()
 	}
@@ -1896,6 +1916,33 @@ func (aw *AppWindow) createControls(hInst uintptr) {
 	setText(aw.hDoH, T("checkbox_doh"))
 	aw.hBlockQUIC = mk("BUTTON", uiBSAUTOCHECKBOX|uiWS_TABSTOP, sx, s1+52, 220, 22, uiIDBlockQUIC)
 	setText(aw.hBlockQUIC, T("tray_block_quic"))
+	// Account-level (server-side) preference, not part of AppSettings -- see
+	// LogUploadToggleFn's doc comment. Starts unchecked; SetLogUploadCheck
+	// is called once the real value is fetched after connecting.
+	aw.hLogUpload = mk("BUTTON", uiBSAUTOCHECKBOX|uiWS_TABSTOP, sx, s1+82, 320, 22, uiIDLogUpload)
+	setText(aw.hLogUpload, T("checkbox_log_upload"))
+}
+
+// SetLogUploadCheck sets the log-upload checkbox's displayed state without
+// firing LogUploadToggleFn -- for pushing the real value fetched from the
+// arbiter (core.LogUploader.GetPref) onto the control, or reverting an
+// optimistic flip the arbiter never accepted, as opposed to the user
+// actually clicking it. Safe to call before the window exists (no-op:
+// hLogUpload is 0 until createControls runs) and from any goroutine: it
+// issues a plain Win32 SendMessage (BM_SETCHECK), which the OS marshals to
+// the control's owning (runLoop) thread when called from another one --
+// unlike the pending*/PostMessage-based setters elsewhere on AppWindow,
+// this doesn't need to stash state for the runLoop to apply later, since
+// BM_SETCHECK is a self-contained message with no shared state to race on.
+func (aw *AppWindow) SetLogUploadCheck(checked bool) {
+	if aw.hLogUpload == 0 {
+		return
+	}
+	val := uintptr(uiBST_UNCHECKED)
+	if checked {
+		val = uintptr(uiBST_CHECKED)
+	}
+	uiSendMessageFn.Call(aw.hLogUpload, uiBM_SETCHECK, val, 0)
 }
 
 func (aw *AppWindow) applySettingsToControls(s AppSettings) {

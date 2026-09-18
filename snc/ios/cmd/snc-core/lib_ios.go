@@ -228,6 +228,70 @@ func SNCReconnect() {
 	}
 }
 
+// logUploadPrefWire is what SNCGetLogUploadPref/SNCSetLogUploadPref actually
+// serialize: the shared snc.LogUploadPrefResponse plus an explicit OK flag.
+// OK is true only when the arbiter really answered -- an all-false response
+// with OK=false means "couldn't reach the arbiter" (no live tunnel dialer
+// yet, or the request failed), which must not be confused with an all-false
+// response with OK=true (a real, legitimate state: global kill switch off
+// AND this user opted out). Decoded by Shared/IPCProtocol.swift's
+// LogUploadPrefReply.
+type logUploadPrefWire struct {
+	snc.LogUploadPrefResponse
+	OK bool `json:"ok"`
+}
+
+func logUploadPrefJSON(pref snc.LogUploadPrefResponse, ok bool) *C.char {
+	b, _ := json.Marshal(logUploadPrefWire{LogUploadPrefResponse: pref, OK: ok})
+	return C.CString(string(b)) // caller must free
+}
+
+// SNCGetLogUploadPref fetches this account's current log-upload preference
+// from the arbiter -- see docs/LOG_UPLOAD_PRIVACY.md and
+// PacketTunnelProvider.swift's .getLogUploadPref case. Returns the zero
+// value (all false) when there's no live tunnel dialer yet.
+//
+//export SNCGetLogUploadPref
+func SNCGetLogUploadPref() *C.char {
+	if gPool == nil {
+		return logUploadPrefJSON(snc.LogUploadPrefResponse{}, false)
+	}
+	dialer := gPool.Pick()
+	if dialer == nil {
+		return logUploadPrefJSON(snc.LogUploadPrefResponse{}, false)
+	}
+	pref, err := snc.NewLogUploader(gNodeID, "ios").GetPref(dialer)
+	if err != nil {
+		snc.Log.Printf("snc-core-ios: log-upload-pref-get: %v", err)
+		return logUploadPrefJSON(snc.LogUploadPrefResponse{}, false)
+	}
+	return logUploadPrefJSON(pref, true)
+}
+
+// SNCSetLogUploadPref sets this account's own log-upload preference (the
+// self-service half of the three switches -- see
+// docs/LOG_UPLOAD_PRIVACY.md; a staff override, if any, can't be cleared
+// from here). Returns the zero value (all false) when there's no live
+// tunnel dialer yet -- the caller (PacketTunnelProvider.swift) should not
+// treat that as "successfully disabled."
+//
+//export SNCSetLogUploadPref
+func SNCSetLogUploadPref(enabled C.int) *C.char {
+	if gPool == nil {
+		return logUploadPrefJSON(snc.LogUploadPrefResponse{}, false)
+	}
+	dialer := gPool.Pick()
+	if dialer == nil {
+		return logUploadPrefJSON(snc.LogUploadPrefResponse{}, false)
+	}
+	pref, err := snc.NewLogUploader(gNodeID, "ios").SetPref(dialer, enabled != 0)
+	if err != nil {
+		snc.Log.Printf("snc-core-ios: log-upload-pref-set: %v", err)
+		return logUploadPrefJSON(snc.LogUploadPrefResponse{}, false)
+	}
+	return logUploadPrefJSON(pref, true)
+}
+
 func main() {} // required for c-archive build mode
 
 // â”€â”€ Tunnel goroutine â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€

@@ -207,6 +207,42 @@ func (s *ipcServer) PushClubTheme(theme, badge string, isAdmin, canRecommend boo
 	})
 }
 
+// PushLogUploadPref sends this account's current log-upload preference to
+// the tray process, which forwards it to the window's Settings-panel
+// checkbox (see core.LogUploader.GetPref/SetPref, docs/LOG_UPLOAD_PRIVACY.md).
+// Called after a successful SetPref, and once shortly after connect so the
+// checkbox reflects the real server-side value rather than a stale default.
+func (s *ipcServer) PushLogUploadPref(pref core.LogUploadPrefResponse) {
+	s.mu.Lock()
+	conn := s.conn
+	s.mu.Unlock()
+	if conn == nil {
+		return
+	}
+	conn.SendMsg(snmac.IPCMsg{ //nolint:errcheck
+		T:                      "log_upload_pref",
+		LogUploadOK:            true,
+		LogUploadEnabled:       pref.Enabled,
+		LogUploadEffective:     pref.Effective,
+		LogUploadAdminDisabled: pref.AdminDisabled,
+		LogUploadGlobalEnabled: pref.GlobalEnabled,
+	})
+}
+
+// PushLogUploadPrefFailed tells the tray process the daemon couldn't reach
+// the arbiter for a log-upload-preference request (no live tunnel dialer,
+// or the request failed), so the window can revert its optimistically-
+// flipped Settings-panel checkbox to the last confirmed value.
+func (s *ipcServer) PushLogUploadPrefFailed() {
+	s.mu.Lock()
+	conn := s.conn
+	s.mu.Unlock()
+	if conn == nil {
+		return
+	}
+	conn.SendMsg(snmac.IPCMsg{T: "log_upload_pref", LogUploadOK: false}) //nolint:errcheck
+}
+
 // PushAuthWarn tells the tray to show an auth-warning tooltip.
 func (s *ipcServer) PushAuthWarn(msg string) {
 	s.mu.Lock()

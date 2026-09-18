@@ -50,4 +50,17 @@ void SNCSetWildcatToken(const char *cToken);
 // SNCReconnect signals the tunnel to rebuild the dialer pool (call on network change).
 void SNCReconnect(void);
 
+// SNCGetLogUploadPref returns a JSON string
+// {"enabled":bool,"admin_disabled":bool,"global_enabled":bool,"effective":bool}
+// -- this account's log-upload preference, fetched from the arbiter (see
+// docs/LOG_UPLOAD_PRIVACY.md). All fields false when there's no live tunnel
+// yet. The caller must free the returned pointer with SNCFreeString.
+char *SNCGetLogUploadPref(void);
+
+// SNCSetLogUploadPref sets this account's own log-upload preference
+// (enabled: 1 = on, 0 = off) and returns the resulting state in the same
+// JSON shape as SNCGetLogUploadPref. The caller must free the returned
+// pointer with SNCFreeString.
+char *SNCSetLogUploadPref(int32_t enabled);
+
 #endif /* SNCTunnel_Bridging_Header_h */

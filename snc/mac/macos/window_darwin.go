@@ -33,6 +33,7 @@ type SNCWindow struct {
 	onConnect          func()
 	onDisconnect       func()
 	onSettings         func(AppSettings)
+	onLogUploadToggle  func(enabled bool) // see SetLogUploadToggleCallback
 	onPageReady        func()
 	onRecommend        func(username string) // set via SetRecommendCallback; see tunnel_cat/docs/club-membership.md
 	onClubThemePreview func(theme string)    // set via SetClubThemePreviewCallback
@@ -54,6 +55,14 @@ func (w *SNCWindow) SetRecommendCallback(fn func(username string)) { w.onRecomme
 // (see keyenc.go's IsAdmin doc comment -- "never a real permission"); the
 // callback just needs to update local UI state, no tunnel/session round trip.
 func (w *SNCWindow) SetClubThemePreviewCallback(fn func(theme string)) { w.onClubThemePreview = fn }
+
+// SetLogUploadToggleCallback registers the function called when the user
+// flips the Settings-panel "send diagnostic logs" checkbox. Deliberately
+// separate from the onSettings/PushSettings pair: this preference lives on
+// the account server-side (core.LogUploader.SetPref), not in local
+// AppSettings, and setting it requires a live tunnel dialer -- see
+// docs/LOG_UPLOAD_PRIVACY.md.
+func (w *SNCWindow) SetLogUploadToggleCallback(fn func(enabled bool)) { w.onLogUploadToggle = fn }
 
 // credentialResult carries the outcome of the credential-login panel back
 // from the ObjC delegate: either an email+password submission, or a
@@ -253,6 +262,22 @@ func (w *SNCWindow) PushSettings(s AppSettings) {
 	updateReady := globalTray != nil && globalTray.IsUpdateReady()
 	quicLocked := globalTray != nil && globalTray.IsWildcatQUICLocked()
 	windowSyncAppMenu(s.DoH, s.BlockQUIC, s.Wildcat, s.Region, updateReady, quicLocked)
+}
+
+// PushLogUploadPref encodes p (plus ok) as JSON and calls
+// window.onLogUploadPrefUpdate in the WebView, so the Settings-panel checkbox
+// reflects this account's real server-side preference (see
+// core.LogUploader.GetPref). ok == false means the daemon couldn't reach the
+// arbiter (no live tunnel, or the request failed) -- the JS side reverts its
+// optimistically-flipped checkbox to the last confirmed value instead of
+// leaving the UI showing a change the server never accepted; p is ignored in
+// that case.
+func (w *SNCWindow) PushLogUploadPref(ok bool, p core.LogUploadPrefResponse) {
+	b, _ := json.Marshal(struct {
+		OK bool `json:"ok"`
+		core.LogUploadPrefResponse
+	}{OK: ok, LogUploadPrefResponse: p})
+	windowPushLogUploadPref(b)
 }
 
 // â”€â”€ HTML / CSS / JS â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -536,6 +561,13 @@ body::before{
           <input type="checkbox" id="s-block-quic" onchange="saveSettings()">
         </div>
       </div>
+      <div class="settings-section">
+        <h3>{{T:html_settings_privacy}}</h3>
+        <div class="srow">
+          <div class="srow-label">{{T:html_log_upload_label}}</div>
+          <input type="checkbox" id="s-log-upload" onchange="setLogUploadPref()">
+        </div>
+      </div>
       <div class="settings-section" id="club-theme-section" style="display:none">
         <h3>{{T:html_club_theme_section}}</h3>
         <div class="srow">
@@ -732,6 +764,25 @@ window.onSettingsUpdate = function(s) {
   // rather than just greying it (checkbox state above is left untouched,
   // so it reads correctly again the moment WildCat releases the lock).
   document.getElementById('s-block-quic-row').style.display = s.quicLocked ? 'none' : '';
+};
+
+// Log-upload preference lives on the account server-side (see
+// docs/LOG_UPLOAD_PRIVACY.md), not in local AppSettings -- separate
+// send/receive functions from saveSettings()/onSettingsUpdate above.
+var lastLogUploadPref = true; // last value the arbiter actually confirmed (server-side default: on)
+function setLogUploadPref() {
+  window.webkit.messageHandlers.sncSetLogUploadPref.postMessage(
+    document.getElementById('s-log-upload').checked);
+}
+window.onLogUploadPrefUpdate = function(p) {
+  var el = document.getElementById('s-log-upload');
+  if (p.ok) {
+    lastLogUploadPref = !!p.enabled;
+  }
+  // ok=false: the daemon couldn't reach the arbiter (no live tunnel, or the
+  // request failed) -- revert the optimistically-flipped checkbox to the
+  // last confirmed value rather than leave it showing an unaccepted change.
+  el.checked = lastLogUploadPref;
 };
 
 // Notify Go that the page is ready so it can re-push the current status.

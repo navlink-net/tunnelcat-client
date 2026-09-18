@@ -32,6 +32,12 @@ void snc_window_push_status(const char *statusJSON);
 // snc_window_push_settings evaluates window.onSettingsUpdate(<settingsJSON>) in the WebView.
 void snc_window_push_settings(const char *settingsJSON);
 
+// snc_window_push_log_upload_pref evaluates window.onLogUploadPrefUpdate(<prefJSON>)
+// in the WebView -- see docs/LOG_UPLOAD_PRIVACY.md. Separate from
+// snc_window_push_settings: this preference lives on the account
+// server-side (core.LogUploader.GetPref/SetPref), not in local AppSettings.
+void snc_window_push_log_upload_pref(const char *prefJSON);
+
 // snc_window_push_club_theme evaluates window.onClubThemeUpdate(<themeJSON>)
 // in the WebView -- see tunnel_cat/docs/club-membership.md. themeJSON is
 // {"theme":"","badge":""} for the regular tier (no badge), or

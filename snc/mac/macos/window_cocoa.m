@@ -134,6 +134,9 @@ expectedContentLength:(NSInteger)data.length
                                                 encoding:NSUTF8StringEncoding];
             go_snc_set_settings([s UTF8String]);
         }
+    } else if ([name isEqualToString:@"sncSetLogUploadPref"]) {
+        BOOL enabled = [msg.body isKindOfClass:[NSNumber class]] && [(NSNumber *)msg.body boolValue];
+        go_snc_set_log_upload_pref(enabled ? 1 : 0);
     } else if ([name isEqualToString:@"sncPageReady"]) {
         go_snc_page_ready();
     } else if ([name isEqualToString:@"sncRecommend"]) {
@@ -230,6 +233,7 @@ void snc_window_init(void) {
             WKUserContentController *ucc = [[WKUserContentController alloc] init];
             for (NSString *n in @[@"sncConnect", @"sncDisconnect",
                                   @"sncHideWindow", @"sncSetSettings",
+                                  @"sncSetLogUploadPref",
                                   @"sncPageReady", @"sncRecommend",
                                   @"sncClubThemePreview"]) {
                 [ucc addScriptMessageHandler:sncMsgHandler name:n];
@@ -314,6 +318,12 @@ void snc_window_push_status(const char *statusJSON) {
 void snc_window_push_settings(const char *settingsJSON) {
     NSString *js = [NSString stringWithFormat:
         @"window.onSettingsUpdate && window.onSettingsUpdate(%s)", settingsJSON];
+    evalJS(js);
+}
+
+void snc_window_push_log_upload_pref(const char *prefJSON) {
+    NSString *js = [NSString stringWithFormat:
+        @"window.onLogUploadPrefUpdate && window.onLogUploadPrefUpdate(%s)", prefJSON];
     evalJS(js);
 }
 
