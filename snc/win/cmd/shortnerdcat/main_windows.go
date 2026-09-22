@@ -790,7 +790,7 @@ func main() {
 		}
 		torrentUpdateOnce.Do(func() {
 			zipPath := filepath.Join(dataDir, softwareName)
-			if err := core.ApplyTorrentDownloadedZip(zipPath, snwin.IsInstalledByInstaller()); err != nil {
+			if err := core.ApplyTorrentDownloadedZip(zipPath, snwin.IsInstalledByInstaller(), globalDisc.TorrentHash(slug)); err != nil {
 				logevent.Emit(binlog.TagSystem, logevent.EventWinSettingsChange,
 					logevent.Str(logevent.AttrSetting, "torrent_update"),
 					logevent.Str(logevent.AttrStage, "apply_failed"),

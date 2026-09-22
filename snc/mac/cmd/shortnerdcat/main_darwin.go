@@ -788,7 +788,7 @@ func main() {
 		}
 		torrentUpdateOnce.Do(func() {
 			dmgPath := filepath.Join(dataDir, softwareName)
-			if err := core.ApplyTorrentDownloadedDMG(dmgPath); err != nil {
+			if err := core.ApplyTorrentDownloadedDMG(dmgPath, globalDisc.TorrentHash("macos")); err != nil {
 				core.Log.Printf("torrent: stage DMG failed: %v", err)
 				return
 			}

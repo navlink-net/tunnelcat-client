@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"runtime/debug"
 	"sort"
@@ -503,7 +504,7 @@ func main() {
 		}
 		torrentUpdateOnce.Do(func() {
 			debPath := filepath.Join(dataDir, softwareName)
-			if err := core.ApplyTorrentDownloadedDeb(debPath); err != nil {
+			if err := core.ApplyTorrentDownloadedDeb(debPath, globalDisc.TorrentHash("linux")); err != nil {
 				core.Log.Printf("torrent: apply update failed: %v", err)
 				return
 			}
@@ -2639,8 +2640,23 @@ func runCLIClient(args []string) {
 	}
 }
 
+// cliSocketGroup owns cliSocketPath so non-root members of it (not literally
+// anyone on the box) can query/control the daemon -- see postinst, which
+// creates this system group and is the intended way a desktop user gets in
+// it (e.g. `usermod -aG shortnerdcat $USER`).
+const cliSocketGroup = "shortnerdcat"
+
 // runCLIServer listens on cliSocketPath and handles each CLI request in its
-// own goroutine. The socket is world-readable so non-root users can query it.
+// own goroutine. The socket is owned by cliSocketGroup, mode 0660 --
+// membership in that group (not mere presence on the machine) is what lets
+// a non-root user query/control the daemon, including the "key" command,
+// which silently swaps the active tunnel credential. Before 2026-09
+// security review #2 this was chmod 0666 with no group check at all, so
+// ANY local process/user could disconnect the tunnel or push an
+// attacker-supplied activation key. Falls back to the old 0666 (logged) only
+// if cliSocketGroup doesn't exist -- e.g. a manual, non-.deb install that
+// hasn't run postinst's groupadd -- so a hand-built binary still works
+// rather than silently locking every caller out.
 func runCLIServer(socketPath, logDir string, srv *ipcServer) {
 	os.Remove(socketPath)
 	ln, err := net.Listen("unix", socketPath)
@@ -2648,7 +2664,19 @@ func runCLIServer(socketPath, logDir string, srv *ipcServer) {
 		core.Log.Printf("cli: listen %s: %v", socketPath, err)
 		return
 	}
-	os.Chmod(socketPath, 0666) //nolint:errcheck
+	if grp, gerr := user.LookupGroup(cliSocketGroup); gerr == nil {
+		if gid, aerr := strconv.Atoi(grp.Gid); aerr == nil {
+			if cerr := os.Chown(socketPath, -1, gid); cerr == nil {
+				os.Chmod(socketPath, 0660) //nolint:errcheck
+			} else {
+				core.Log.Printf("cli: chown %s to group %s: %v -- falling back to world-accessible socket", socketPath, cliSocketGroup, cerr)
+				os.Chmod(socketPath, 0666) //nolint:errcheck
+			}
+		}
+	} else {
+		core.Log.Printf("cli: group %q not found (%v) -- falling back to world-accessible socket; run as root or create the group to restrict access", cliSocketGroup, gerr)
+		os.Chmod(socketPath, 0666) //nolint:errcheck
+	}
 	defer ln.Close()
 	core.Log.Printf("cli: listening on %s", socketPath)
 	for {
