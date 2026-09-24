@@ -26,7 +26,7 @@ import (
 const loginWebviewDataPath = `C:\.shortnerdcat\webview2-login`
 
 // loginURLBase is the same-origin page loaded into the popup. Replaces the
-// old raw Win32 credential-login dialog (dialog_auth.go's
+// old raw Win32 credential-login dialog (removed; formerly dialog_auth.go's
 // showLoginDialogImpl) with a themed page matching signup-app.html's look,
 // per feedback_no_default_os_dialogs_unified_style -- see login-app.html's
 // own doc comment for the full rationale and the division of labor (the
@@ -38,7 +38,7 @@ const loginURLBase = "https://navlink.net/login-app.html"
 // credential login. prefillEmail, if non-empty, pre-fills the email field
 // (passed as a URL query param) and focuses the password field instead --
 // used when returning here right after a successful sign-up, same as the
-// old dialog's ShowLoginDialogWithEmail.
+// former native dialog.
 //
 // Exactly one of these three outcomes holds on return:
 //   - keyStr != "": logged in and a key was issued -- use it like a typed key.
