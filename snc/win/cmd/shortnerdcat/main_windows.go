@@ -3366,8 +3366,8 @@ func obtainActivationKey() (string, error) {
 	// The "do you have a key?" Yes/No prompt is no longer shown automatically
 	// -- go straight to the screen that matches reachability. The user can
 	// still switch manually: ShowKeyDialogWithLogin's "Log In Instead" button
-	// and ShowLoginDialog's "I Have a Key" button (below, via navlinkLoginFlow)
-	// remain fully wired.
+	// and the login webview's "I Have a Key" button (below, via
+	// navlinkLoginFlow) remain fully wired.
 	if !reachable {
 		// Without navlink.net reachable, login can never succeed, so go
 		// straight to manual key entry (no Login button — it wouldn't work).
@@ -3377,15 +3377,31 @@ func obtainActivationKey() (string, error) {
 		}
 		return keyStr, nil
 	}
-	return navlinkLoginFlow(nc, ctx)
+	return navlinkLoginFlow()
 }
 
-// navlinkLoginFlow prompts for navlink.net credentials, retrying on
-// authentication failure, until the user either succeeds, cancels, or
-// switches to manual key entry via "I Have a Key".
-func navlinkLoginFlow(nc *navlinkauth.Client, ctx context.Context) (string, error) {
+// navlinkLoginFlow shows the themed login popup (login-app.html, via
+// ShowLoginWebView -- see that page's own doc comment for why the actual
+// /api/account/login + /api/key/free calls live in the page's JS rather
+// than here) until the user either succeeds, cancels, switches to manual
+// key entry via "I Have a Key", or creates a new account.
+//
+// "Create New Account" opens a separate webview (email + captcha only --
+// see ShowCreateAccountWebView's own doc comment) and, once the
+// confirmation email is sent, returns straight to this same login page
+// with the email pre-filled: registration itself ends at that email; the
+// rest is this ordinary login flow, same as for any other account, once the
+// user has clicked the link and knows their password (mailed to them on
+// confirmation).
+func navlinkLoginFlow() (string, error) {
+	prefillEmail := ""
 	for {
-		email, password, ok, wantsKeyMode := snwin.ShowLoginDialog()
+		keyStr, wantsKeyMode, wantsSignup := snwin.ShowLoginWebView(prefillEmail)
+		prefillEmail = ""
+		if wantsSignup {
+			prefillEmail = snwin.ShowCreateAccountWebView()
+			continue
+		}
 		if wantsKeyMode {
 			keyStr, ok := snwin.ShowKeyDialog()
 			if !ok || keyStr == "" {
@@ -3393,17 +3409,8 @@ func navlinkLoginFlow(nc *navlinkauth.Client, ctx context.Context) (string, erro
 			}
 			return keyStr, nil
 		}
-		if !ok {
+		if keyStr == "" {
 			return "", fmt.Errorf("cancelled")
-		}
-		if err := nc.Login(ctx, email, password); err != nil {
-			snwin.ShowError("Could not log in:\n\n" + err.Error())
-			continue
-		}
-		keyStr, _, _, err := nc.FreeKey(ctx)
-		if err != nil {
-			snwin.ShowError("Logged in, but could not get a key:\n\n" + err.Error())
-			continue
 		}
 		return keyStr, nil
 	}

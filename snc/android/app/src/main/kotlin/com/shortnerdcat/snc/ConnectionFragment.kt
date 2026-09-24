@@ -170,6 +170,21 @@ class ConnectionFragment : Fragment() {
             loginScreen = LoginScreen.KEY_ENTRY
             updateUI()
         }
+        binding.btnCreateAccount.setOnClickListener {
+            val dialog = SignupDialogFragment()
+            dialog.onSignupDone = { email ->
+                // Registration ends here, with the confirmation email sent --
+                // the rest is the ordinary login flow, same as for any other
+                // account, once the user has clicked the link and knows
+                // their password. See SignupDialogFragment's own doc comment.
+                userSwitchedScreen = true
+                loginScreen = LoginScreen.CREDENTIAL_LOGIN
+                _binding?.editEmail?.setText(email)
+                updateUI()
+                _binding?.editPassword?.requestFocus()
+            }
+            dialog.show(parentFragmentManager, SignupDialogFragment.TAG)
+        }
         binding.btnTogglePassword.setOnClickListener {
             val showing = binding.editPassword.inputType and
                 android.text.InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD != 0

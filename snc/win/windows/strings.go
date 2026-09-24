@@ -37,6 +37,10 @@ var stringsEN = map[string]string{
 	"login_button":       "Login",
 	"i_have_a_key":       "I Have a Key",
 
+	// -- Sign-up webview (signup_webview_windows.go) --
+	"signup_dialog_title":    "ShortNerdCat -- Create Account",
+	"signup_load_failed_msg": "Could not open the sign-up page:\n\n",
+
 	// -- Recommend-a-member dialog (dialog_recommend.go) --
 	"recommend_dialog_title": "ShortNerdCat -- Recommend a Member",
 	"recommend_label":        "Username to recommend for Cat Club:",
@@ -149,6 +153,9 @@ var stringsRU = map[string]string{
 	"password_label":     "Пароль:",
 	"login_button":       "Войти",
 	"i_have_a_key":       "У меня есть ключ",
+
+	"signup_dialog_title":    "ShortNerdCat - Регистрация",
+	"signup_load_failed_msg": "Не удалось открыть страницу регистрации:\n\n",
 
 	"recommend_dialog_title": "ShortNerdCat - Рекомендация участника",
 	"recommend_label":        "Имя пользователя для рекомендации в Cat Club:",

@@ -13,6 +13,7 @@
     <string name="toggle_password_visibility">Show or hide password</string>
     <string name="login_button">Login</string>
     <string name="i_have_a_key">I Have a Key</string>
+    <string name="create_account">Create New Account</string>
     <string name="log_in_instead">Log In Instead</string>
     <string name="status_connected">● Connected</string>
     <string name="status_connecting">◌ Connecting…</string>
