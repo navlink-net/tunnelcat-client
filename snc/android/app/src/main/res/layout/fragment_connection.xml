@@ -25,7 +25,7 @@
     android:layout_height="match_parent"
     android:orientation="vertical">
 
-    <!-- Mode ribbon: shown when WildCat is active. -->
+    <!-- Mode ribbon: no longer used (WildCat mode removed). -->
     <TextView
         android:id="@+id/ribbonMode"
         android:layout_width="match_parent"
@@ -359,7 +359,7 @@
 
     <!-- Full-width bottom status bar, colored per tunnel state (mirrors the
          win/mac/linux clients): gray=disconnected, orange=connecting,
-         green=connected, black=wildcat, red=error (with the real message). -->
+         green=connected, red=error (with the real message). -->
     <TextView
         android:id="@+id/textStatus"
         android:layout_width="match_parent"

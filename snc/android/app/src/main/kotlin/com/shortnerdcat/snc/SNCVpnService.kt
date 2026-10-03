@@ -62,7 +62,6 @@ class SNCVpnService : VpnService() {
     private var screenReceiver: BroadcastReceiver? = null
     private var wakeLock: PowerManager.WakeLock? = null
     private val stateWatchActive = AtomicBoolean(false)
-    private var decoyTraffic: DecoyTraffic? = null
     // Network-quality diagnostics (type/signal/bandwidth/location) for support logs —
     // see networkDiagnosticsLine(). lastLoggedNetDiag avoids re-logging on every
     // onCapabilitiesChanged callback (which can fire every few seconds) when nothing
@@ -110,29 +109,6 @@ class SNCVpnService : VpnService() {
             stopVpn()
             return START_NOT_STICKY
         }
-        if (intent?.action == ACTION_SET_WILDCAT) {
-            val enabled = intent.getBooleanExtra(EXTRA_WILDCAT, false)
-            if (enabled) {
-                if (decoyTraffic == null) {
-                    decoyTraffic = DecoyTraffic(this).also { it.start() }
-                }
-            } else {
-                decoyTraffic?.stop()
-                decoyTraffic = null
-            }
-            // The IPC socket is only available after bootstrap completes.
-            // When WildCat is toggled while still connecting (bootstrap in progress),
-            // sendIpc silently fails and the Go core never sees the command.
-            // Restart the VPN process so SNC_WILDCAT is set correctly in the env from startup.
-            val k = lastKey
-            if (k != null && (isRunning || isConnecting)) {
-                stopVpn(selfStop = false)
-                isConnecting = true
-                notifyState()
-                startService(Intent(this, SNCVpnService::class.java).putExtra(EXTRA_KEY, k))
-            }
-            return START_NOT_STICKY
-        }
         // Resolve key: prefer the one in the intent (normal start / reconnect),
         // fall back to the persisted key when Android restarts the service after
         // killing it (START_STICKY delivers intent=null in that case).
@@ -166,38 +142,27 @@ class SNCVpnService : VpnService() {
         notifyState()
         startForeground(NOTIFICATION_ID, buildNotification())
         acquireWakeLock()
-        // WildCat token: prefer the one supplied by MainActivity (Browse-tab flow); fall back to
-        // the cached token for sticky restarts where Android relaunches the service without
-        // the user explicitly pressing Connect (token may still be valid if <18 min elapsed).
-        val wildcatNow = getSharedPreferences("snc", MODE_PRIVATE).getBoolean("wildcat", false)
-        val wildcatToken: String? = if (wildcatNow) {
-            intent?.getStringExtra(EXTRA_WILDCAT_TOKEN) ?: WildcatAuth.getCachedToken(this)
-        } else null
         // manual: true only for a genuine user-initiated connect (EXTRA_KEY present in
         // the intent, i.e. the "connect" branch of startReason above) -- "reconnect"
-        // (internal, e.g. WildCat toggle) and "sticky-restart" (Android relaunching a
-        // killed service) are both auto. Threaded through to the Go process as
-        // SNC_AUTO_RECONNECT so the admin dashboard's connection-stats feature can
-        // count manual vs automatic connects (see core.ConnStatsCollector).
+        // (internal) and "sticky-restart" (Android relaunching a killed service) are
+        // both auto. Threaded through to the Go process as SNC_AUTO_RECONNECT so the
+        // admin dashboard's connection-stats feature can count manual vs automatic
+        // connects (see core.ConnStatsCollector).
         val manual = startReason == "connect"
-        Thread({ startVpn(key, gen, wildcatToken, manual) }, "snc-vpn-start").start()
+        Thread({ startVpn(key, gen, manual) }, "snc-vpn-start").start()
         return START_STICKY
     }
 
-    private fun startVpn(key: String, gen: Int, wildcatToken: String?, manual: Boolean = true) {
+    private fun startVpn(key: String, gen: Int, manual: Boolean = true) {
         // processExited: true if Go exited normally (any code); false if setup threw.
         // wasKeyDenied: captured before stopVpn() clears isKeyDenied.
         // exitState: last value of snc.state read synchronously after exit (may be empty).
-        // awaitingWildcatLogin: true when we abort early to wait for login; skip finally cleanup
-        // so the service stays alive with isConnecting=true, allowing ACTION_SET_WILDCAT to
-        // restart the VPN automatically after the user logs in.
         var processExited = false
         var wasKeyDenied = false
         var exitState = ""
-        var awaitingWildcatLogin = false
         // fatalSetupError: true when setup failed in a way that requires user action
-        // (binary missing, WildCat warmup credential failure).  Set inside try so catch
-        // can distinguish fatal from transient setup exceptions.
+        // (binary missing).  Set inside try so catch can distinguish fatal from
+        // transient setup exceptions.
         var fatalSetupError = false
         LogEvent.emitSystem(LogEvents.AndroidVpnStartBegin, LogAttrs.ATTR_Gen to gen.toLong())
         try {
@@ -242,82 +207,18 @@ class SNCVpnService : VpnService() {
             }, "snc-uid").apply { isDaemon = true; start() }
             Log.i(TAG, "step 2b OK")
 
-            // Read prefs and prepare paths early — needed by warmup (step 2.5) and main process.
+            // Read prefs and prepare paths early — needed by the main process below.
             val snPrefs = getSharedPreferences("snc", MODE_PRIVATE)
-            val wildcatMode = snPrefs.getBoolean("wildcat", false)
             val disableUdp = snPrefs.getBoolean("disable_udp", false)
             val blockQuic = snPrefs.getBoolean("disable_quic", false)
             val disableBypass = snPrefs.getBoolean("disable_bypass", false)
-            // WildCat mode always forces IPv6 blocked too, same reasoning as
-            // blockQuic above: the arbiter's own ipv6_enabled kill switch (see
-            // addSplitTunnelRoutes) only speaks to normal SNC exits, nothing
-            // about the covert relay's ability to relay IPv6 -- and it almost
-            // certainly can't (same "host:port" TCP-style targets as normal
-            // exits). This is the actual enforcement point (checked live,
-            // per-dial, in appStickyDialer.ipv6Blocked on the Go side) -- the
-            // TUN route for ::/0 is now always added unconditionally
-            // (addSplitTunnelRoutes) specifically so IPv6 can't just bypass
-            // the VPN via the physical interface when this is meant to be off.
-            val disableIpv6 = snPrefs.getBoolean("disable_ipv6", false) || wildcatMode
+            val disableIpv6 = snPrefs.getBoolean("disable_ipv6", false)
             val logDir = File(filesDir, "logs").also { it.mkdirs() }.absolutePath
-            // Detect country once; reused by warmup and main process.
             val countryCC = detectCountryCC(this)
-            // WildCat token is supplied as a parameter — either from the Browse-tab login flow
-            // (Connect-time) or from the SharedPreferences cache (sticky restart within 18 min).
-            if (wildcatMode) {
-                if (wildcatToken != null) {
-                    Log.i(TAG, "WildCat token ready (${wildcatToken.length} chars)")
-                } else {
-                    // No token available. Signal the UI to open the Browse-tab login flow.
-                    // The SharedPreferences flag is a fallback for when MainActivity is in the
-                    // background and the broadcast receiver is not registered yet.
-                    Log.w(TAG, "no token in WildCat mode — requesting login from Browse tab")
-                    awaitingWildcatLogin = true
-                    getSharedPreferences("snc", MODE_PRIVATE).edit()
-                        .putBoolean("wildcat_login_needed", true).apply()
-                    sendBroadcast(
-                        Intent(ACTION_WILDCAT_LOGIN_REQUIRED).setPackage(packageName)
-                            .putExtra(EXTRA_KEY, key)
-                    )
-                    return
-                }
-            }
-
-            // 2.5 (WildCat mode only): pre-VPN credential warmup.
-            // Runs snc-core without a TUN fd so the credential pool
-            // can be fetched while the hidden WebView still has direct internet access.
-            if (wildcatMode) {
-                Log.i(TAG, "step 2.5: WildCat warmup")
-                this.ipcPath = ipcName
-                val warmupProc = CoreProcess.start(
-                    context = this,
-                    key = key,
-                    tunFd = -1,
-                    protectSocket = "@$protectName",
-                    ipcSocket = "@$ipcName",
-                    logDir = logDir,
-                    dataDir = filesDir.absolutePath,
-                    wildcatMode = true,
-                    warmupOnly = true,
-                    countryCC = countryCC,
-                    wildcatAccessToken = wildcatToken,
-                )
-                val warmupCode = warmupProc.waitFor()
-                Log.i(TAG, "step 2.5: warmup exit=$warmupCode")
-                if (gen != generation) return
-                if (warmupCode != 0) {
-                    fatalSetupError = true
-                    val detail = try {
-                        File(filesDir, "warmup-error.txt").readText().trim().takeIf { it.isNotEmpty() }
-                    } catch (_: Exception) { null }
-                    throw IOException(detail ?: "WildCat warmup failed (code $warmupCode)")
-                }
-            }
 
             // Stop the background keepalive process immediately before establishing the
             // TUN so it does not write to shared dataDir files concurrently with the
-            // main snc-core.  Moved here (from before warmup) so background service
-            // keeps running during warmup — its cred downloads help warmup succeed.
+            // main snc-core.
             SncBackgroundService.instance?.pauseForVpn()
 
             // 3. Create the VPN TUN interface.
@@ -433,11 +334,7 @@ class SNCVpnService : VpnService() {
             lastIpcSuccessAt = System.currentTimeMillis()
             // Static mirror so non-service callers (MainActivity's club-theme
             // preview and Recommend dialog) can reach the running snc-core's
-            // IPC socket without needing a bound-service reference. Left
-            // unset for the WildCat warmup process above (line ~222) --
-            // that one has no club discovery running and exits before the
-            // real tunnel starts, so a request sent while it's still the
-            // "current" path would just hang until it exits.
+            // IPC socket without needing a bound-service reference.
             ipcPathStatic = ipcName
             try { File(filesDir, "snc.state").delete() } catch (_: Exception) {}
             Log.i(TAG, "step 5: logDir=$logDir ipc=@$ipcName")
@@ -453,13 +350,11 @@ class SNCVpnService : VpnService() {
                 ipcSocket = "@$ipcName",
                 logDir = logDir,
                 dataDir = filesDir.absolutePath,
-                wildcatMode = wildcatMode,
                 disableUdp = disableUdp,
                 blockQuic = blockQuic,
                 disableBypass = disableBypass,
                 disableIpv6 = disableIpv6,
                 countryCC = countryCC,
-                wildcatAccessToken = wildcatToken,
                 manual = manual,
             )
             coreProcess = proc
@@ -476,9 +371,6 @@ class SNCVpnService : VpnService() {
             registerNetworkCallback()
             registerScreenReceiver()
             startStateWatch()
-            if (wildcatMode) {
-                decoyTraffic = DecoyTraffic(this).also { it.start() }
-            }
 
             // 7. Block until the Go process exits, then clean up.
             val exitCode = proc.waitFor()
@@ -500,9 +392,8 @@ class SNCVpnService : VpnService() {
             if (gen == generation) {
                 // Distinguish fatal errors (need user action) from transient errors (retry).
                 //
-                // Fatal: the binary is missing (broken install) or WildCat warmup failed
-                // with a meaningful credential error — show the message, stop the service,
-                // and wait for the user to fix the issue.
+                // Fatal: the binary is missing (broken install) — show the message, stop
+                // the service, and wait for the user to fix the issue.
                 //
                 // Transient: establish() returned null (network not ready after a switch),
                 // socket setup failed, process launch failed, or any other IOException —
@@ -521,16 +412,7 @@ class SNCVpnService : VpnService() {
                         // processExited stays false; shouldReconnect is false via intentionalStop.
                     }
                     fatalSetupError -> {
-                        val msg = e.message ?: e.javaClass.simpleName
-                        // account banned from API (error_code:18) — stale token is useless;
-                        // clear it and send the user back to the login screen.
-                        if (msg.contains("\"error_code\":18") || msg.contains("error_code:18")) {
-                            WildcatAuth.clearCachedToken(this)
-                            lastError = getString(R.string.error_wildcat_reauth_required)
-                            sendBroadcast(Intent(ACTION_WILDCAT_LOGIN_REQUIRED))
-                        } else {
-                            lastError = msg
-                        }
+                        lastError = e.message ?: e.javaClass.simpleName
                         isError = true
                     }
                     else -> {
@@ -544,11 +426,6 @@ class SNCVpnService : VpnService() {
                 }
             }
         } finally {
-            if (awaitingWildcatLogin) {
-                // Service stays alive with isConnecting=true while Browse tab acquires a token.
-                // onStartCommand will fire again with EXTRA_WILDCAT_TOKEN once login completes.
-                return
-            }
             if (gen == generation) {
                 // Reconnect on any unintentional Go process exit unless the key was denied or
                 // invalid. Key issues require user action; all other exits (stall, unreachable
@@ -780,8 +657,6 @@ class SNCVpnService : VpnService() {
         LogEvent.emitSystem(LogEvents.AndroidVpnStop, LogAttrs.ATTR_SelfStop to selfStop)
         intentionalStop = true
         stateWatchActive.set(false)
-        decoyTraffic?.stop()
-        decoyTraffic = null
         releaseWakeLock()
         unregisterNetworkCallback()
         unregisterScreenReceiver()
@@ -816,7 +691,7 @@ class SNCVpnService : VpnService() {
         uidServer = null
         // Best-effort: tell Go this session is ending (manual = selfStop -- a
         // genuine user/explicit disconnect vs. the teardown-before-reconnect case,
-        // e.g. WildCat toggle, where selfStop=false and a new startVpn follows
+        // where selfStop=false and a new startVpn follows
         // immediately) before destroy() kills the process. Same fire-and-forget,
         // no-response-awaited shape as sendReconnect -- there is no cooperative
         // shutdown handshake here (destroy() sends SIGTERM right after this),
@@ -1019,7 +894,7 @@ class SNCVpnService : VpnService() {
                 // (2026-08-25) showed exactly that: heartbeat failing every 60s for
                 // the rest of the session, Go's own log confirming its socket bound
                 // fine, and the session only ever ending via manual disconnect --
-                // the existing WildCat "no live TURN sessions" watchdog never got a
+                // the existing "no live relay sessions" watchdog never got a
                 // chance to fire because the user always gave up first. Calling
                 // coreProcess.destroy() directly (not stopVpn()) leaves
                 // intentionalStop false, so the existing "process exited
@@ -1229,7 +1104,7 @@ class SNCVpnService : VpnService() {
         val path = ipcPath
         if (path == null) {
             // 2026-08-07: a real user's logs showed *zero* IPC commands of any kind
-            // (reconnect, nettype, screen-on/off, wildcat-token) reaching Go across three
+            // (reconnect, nettype, screen-on/off) reaching Go across three
             // full VPN sessions with confirmed network switches -- but the only trace
             // of a failure was ever going to Logcat via the catch below, which isn't
             // in the log ZIP users send us. Logging every path here (including this
@@ -1485,22 +1360,13 @@ class SNCVpnService : VpnService() {
         builder.addRoute("::", 0)
     }
 
-    // Push a fresh WildCat access token to the running snc-core via IPC.
-    // Called from MainActivity's periodic 15-minute refresh.
-    internal fun sendWildcatTokenInternal(token: String) =
-        sendIpc("""{"cmd":"wildcat-token","args":{"token":"$token"}}""", "wildcat-token")
-
     companion object {
         const val ACTION_STOP = "com.shortnerdcat.snc.STOP"
         // SharedPreferences key used to persist the subscription key across
         // Android process kills so START_STICKY can recover automatically.
         private const val PREF_KEY = "last_vpn_key"
         const val ACTION_STATE_CHANGED = "com.shortnerdcat.snc.STATE_CHANGED"
-        const val ACTION_SET_WILDCAT = "com.shortnerdcat.snc.SET_WILDCAT"
-        const val ACTION_WILDCAT_LOGIN_REQUIRED = "com.shortnerdcat.snc.WILDCAT_LOGIN_REQUIRED"
         const val EXTRA_KEY = "key"
-        const val EXTRA_WILDCAT_TOKEN = "wildcat_token"
-        const val EXTRA_WILDCAT = "wildcat"
         private const val NOTIFICATION_ID = 1
         private const val CHANNEL_ID = "vpn_status"
         private const val CHANNEL_BROADCAST = "snc_broadcast"
@@ -1512,8 +1378,7 @@ class SNCVpnService : VpnService() {
             private set
 
         // Static mirror of the running instance's ipcPath -- see the write
-        // site in startVpn() for why. null whenever no real tunnel process
-        // (as opposed to the WildCat warmup-only process) is up.
+        // site in startVpn() for why. null whenever no tunnel process is up.
         @Volatile
         var ipcPathStatic: String? = null
             internal set
@@ -1620,14 +1485,9 @@ class SNCVpnService : VpnService() {
         @Volatile
         private var serviceInstance: SNCVpnService? = null
 
-        // Push a fresh WildCat token to the live snc-core process.
-        fun pushWildcatToken(token: String) {
-            serviceInstance?.sendWildcatTokenInternal(token)
-        }
-
         // protectIfActive lets other in-process components (e.g. UpdateChecker, which
         // isn't itself a VpnService) bypass the VPN tunnel for their own sockets the
-        // same way DecoyTraffic already does. Returns true when the socket is safe to
+        // Returns true when the socket is safe to
         // use: either genuinely protected, or there's no active VPN to loop into in the
         // first place (full-tunnel routing only exists while this service is up).
         // Returns false only when a VPN *is* active and protect() itself failed --

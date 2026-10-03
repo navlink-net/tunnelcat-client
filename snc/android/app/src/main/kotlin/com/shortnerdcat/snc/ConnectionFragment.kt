@@ -56,8 +56,6 @@ class ConnectionFragment : Fragment() {
     private var lastStatusBg = 0
     private var lastConnectText: String? = null
     private var lastConnectBg = 0
-    private var lastRibbonText: String? = null
-    private var lastRibbonBg = 0
 
     // "No key yet" flow: which of the three screens (key entry / "do you have
     // a key?" / credential login) is currently shown. Starts at key entry --
@@ -289,8 +287,6 @@ class ConnectionFragment : Fragment() {
         lastStatusBg = 0
         lastConnectText = null
         lastConnectBg = 0
-        lastRibbonText = null
-        lastRibbonBg = 0
         lastBandwidthText = null
     }
 
@@ -442,24 +438,9 @@ class ConnectionFragment : Fragment() {
 
     private fun launchVpn() {
         val key = prefs().getString("key", null) ?: return
-        val wildcatMode = prefs().getBoolean("wildcat", false)
-        if (wildcatMode) {
-            // In WildCat mode the user ALWAYS goes through the Browse tab first to acquire
-            // a token. MainActivity orchestrates the full flow and starts the service
-            // with the token as an Intent extra once login completes.
-            (activity as? MainActivity)?.startWildCatConnect(key) ?: resetConnect()
-        } else {
-            requireActivity().startForegroundService(
-                Intent(requireContext(), SNCVpnService::class.java).putExtra(SNCVpnService.EXTRA_KEY, key)
-            )
-            updateUI()
-        }
-    }
-
-    // Reset a pending connect that was handed off to MainActivity but did not result
-    // in a VPN start (e.g. login failed or Browse fragment was unavailable).
-    fun resetConnect() {
-        pendingConnect = false
+        requireActivity().startForegroundService(
+            Intent(requireContext(), SNCVpnService::class.java).putExtra(SNCVpnService.EXTRA_KEY, key)
+        )
         updateUI()
     }
 
@@ -480,28 +461,10 @@ class ConnectionFragment : Fragment() {
         val connecting = SNCVpnService.isConnecting || pendingConnect
         val busy = running || connecting
         val hasKey = prefs().getString("key", "").isNullOrEmpty().not()
-        val wildcatMode = prefs().getBoolean("wildcat", false)
-
-        when {
-            !busy -> b.ribbonMode.visibility = View.GONE
-            wildcatMode -> {
-                val ribbonText = getString(R.string.wildcat_ribbon_text)
-                if (ribbonText != lastRibbonText) {
-                    b.ribbonMode.text = ribbonText
-                    lastRibbonText = ribbonText
-                }
-                val ribbonBg = Color.parseColor("#BF5600")
-                if (ribbonBg != lastRibbonBg) {
-                    b.ribbonMode.setBackgroundColor(ribbonBg)
-                    lastRibbonBg = ribbonBg
-                }
-                b.ribbonMode.visibility = View.VISIBLE
-            }
-            else -> b.ribbonMode.visibility = View.GONE
-        }
+        b.ribbonMode.visibility = View.GONE
 
         // Cat Club / Elite Cat Club theming: same idle/connecting/connected/
-        // wildcat/error illustration set as the regular tier, just a
+        // error illustration set as the regular tier, just a
         // different theme-suffixed drawable (see ClubStatus + snc.club_status,
         // written by snc-core every 5s -- mirrors the Windows client's
         // themedCatPNGs picking by aw.ClubTheme).
@@ -518,10 +481,7 @@ class ConnectionFragment : Fragment() {
             keyDenied  -> themed(R.drawable.snc_error, R.drawable.snc_error_catclub, R.drawable.snc_error_elite)
             running && (!SNCVpnService.isTunnelReady || SNCVpnService.isReconnecting) ->
                 themed(R.drawable.snc_connecting, R.drawable.snc_connecting_catclub, R.drawable.snc_connecting_elite)
-            running    -> when {
-                wildcatMode -> themed(R.drawable.snc_wildcat, R.drawable.snc_wildcat_catclub, R.drawable.snc_wildcat_elite)
-                else        -> themed(R.drawable.snc_connected, R.drawable.snc_connected_catclub, R.drawable.snc_connected_elite)
-            }
+            running    -> themed(R.drawable.snc_connected, R.drawable.snc_connected_catclub, R.drawable.snc_connected_elite)
             connecting -> themed(R.drawable.snc_connecting, R.drawable.snc_connecting_catclub, R.drawable.snc_connecting_elite)
             error      -> themed(R.drawable.snc_error, R.drawable.snc_error_catclub, R.drawable.snc_error_elite)
             else       -> themed(R.drawable.snc_idle, R.drawable.snc_idle_catclub, R.drawable.snc_idle_elite)
@@ -551,7 +511,7 @@ class ConnectionFragment : Fragment() {
         val statusText = when {
             keyDenied  -> getString(R.string.status_key_denied)
             running && (!SNCVpnService.isTunnelReady || SNCVpnService.isReconnecting) -> getString(R.string.status_connecting)
-            running    -> if (wildcatMode) getString(R.string.status_connected_wildcat) else getString(R.string.status_connected)
+            running    -> getString(R.string.status_connected)
             connecting -> getString(R.string.status_connecting)
             error      -> SNCVpnService.lastError ?: getString(R.string.status_error)
             else       -> getString(R.string.status_disconnected)
@@ -562,11 +522,10 @@ class ConnectionFragment : Fragment() {
         }
 
         // Bottom status-bar color, mirroring the win/mac/linux clients:
-        // gray=disconnected, orange=connecting, green=connected, black=wildcat, red=error.
+        // gray=disconnected, orange=connecting, green=connected, red=error.
         val statusBg = when {
             keyDenied || error -> Color.parseColor("#C0392B")
             running && (!SNCVpnService.isTunnelReady || SNCVpnService.isReconnecting) -> Color.parseColor("#E08A2E")
-            running && wildcatMode -> Color.BLACK
             running -> Color.parseColor("#2E8B3D")
             connecting -> Color.parseColor("#E08A2E")
             else -> Color.parseColor("#5B6470")
@@ -640,7 +599,6 @@ class ConnectionFragment : Fragment() {
         view.background = d
     }
 
-    fun onModeChanged() = updateUI()
 
     private fun proceedWithConnect() {
         pendingConnect = true
