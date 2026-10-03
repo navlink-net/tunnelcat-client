@@ -9,6 +9,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.net.Uri
 import androidx.viewpager2.widget.ViewPager2
 import android.content.pm.PackageManager
 import android.os.Build
@@ -274,6 +275,22 @@ class MainActivity : AppCompatActivity() {
     override fun onOptionsItemSelected(item: MenuItem): Boolean {
         val prefs = getSharedPreferences("snc", MODE_PRIVATE)
         return when (item.itemId) {
+            R.id.menu_wildcat -> {
+                // WildCat mode (VK video-call TURN relay transport) is superseded by the
+                // standalone WildCat app (Yandex Telemost transport) -- this menu entry is
+                // now just an info panel pointing there, not a connect-mode toggle.
+                AlertDialog.Builder(this)
+                    .setTitle(R.string.wildcat_info_title)
+                    .setMessage(R.string.wildcat_info_message)
+                    .setPositiveButton(R.string.wildcat_info_download) { _, _ ->
+                        runCatching {
+                            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://apps.navlink.net")))
+                        }
+                    }
+                    .setNegativeButton(R.string.wildcat_info_close, null)
+                    .show()
+                true
+            }
             R.id.menu_disable_ipv6 -> {
                 val newVal = !item.isChecked
                 item.isChecked = newVal

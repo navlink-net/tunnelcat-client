@@ -3,6 +3,12 @@
     xmlns:app="http://schemas.android.com/apk/res-auto">
 
     <item
+        android:id="@+id/menu_wildcat"
+        android:title="@string/wildcat_mode"
+        android:checkable="true"
+        app:showAsAction="never" />
+
+    <item
         android:id="@+id/menu_disable_ipv6"
         android:title="@string/disable_ipv6"
         android:checkable="true"

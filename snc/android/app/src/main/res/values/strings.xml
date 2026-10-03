@@ -50,6 +50,11 @@
     <string name="apps_filter_hint">Filter apps…</string>
     <string name="apps_select_all">Select all</string>
     <string name="apps_deselect_all">Deselect all</string>
+    <string name="wildcat_mode">Wildcat</string>
+    <string name="wildcat_info_title">Wildcat</string>
+    <string name="wildcat_info_message">Whitelist mode is now implemented by a separate app, Wildcat.</string>
+    <string name="wildcat_info_download">Download</string>
+    <string name="wildcat_info_close">Close</string>
     <string name="disable_ipv6">Disable IPv6</string>
     <string name="disable_udp_tunnel">Disable UDP tunnel</string>
     <string name="disable_quic">Disable QUIC</string>
