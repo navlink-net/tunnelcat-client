@@ -18,11 +18,11 @@ enum GoCore {
     ///   connection-stats feature (see core.ConnStatsCollector).
     /// - Returns: `true` on success; `false` if the key is invalid or logging failed.
     static func start(key: String, logDir: URL, dataDir: URL,
-                      tunFD: Int32, wildcatMode: Bool, manual: Bool) -> Bool {
+                      tunFD: Int32, manual: Bool) -> Bool {
         key.withCString { cKey in
             logDir.path.withCString { cLog in
                 dataDir.path.withCString { cData in
-                    SNCStart(cKey, cLog, cData, tunFD, wildcatMode ? 1 : 0, manual ? 1 : 0) == 0
+                    SNCStart(cKey, cLog, cData, tunFD, manual ? 1 : 0) == 0
                 }
             }
         }
@@ -53,18 +53,6 @@ enum GoCore {
     }
 
     // MARK: - Control
-
-    /// Enables or disables WildCat mode. Can be called while the tunnel is running.
-    static func setWildcat(_ enabled: Bool) {
-        SNCSetWildcat(enabled ? 1 : 0)
-    }
-
-    /// Passes a fresh access token to the WildCat credential manager.
-    /// Must be called before starting in WildCat mode, and again whenever the
-    /// token is refreshed.
-    static func setWildcatToken(_ token: String) {
-        token.withCString { SNCSetWildcatToken($0) }
-    }
 
     /// Triggers a pool rebuild (call on network interface change).
     static func reconnect() {

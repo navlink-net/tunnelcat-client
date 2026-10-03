@@ -30,18 +30,6 @@ final class ConnectionViewController: UIViewController {
         return l
     }()
 
-    // Orange banner shown in WildCat mode while connected/connecting.
-    private let ribbonWildCat: UILabel = {
-        let l = UILabel()
-        l.text = L.t("wildcat.ribbon")
-        l.font = SNCTheme.Font.bold(13)
-        l.textColor = SNCTheme.textPrimary
-        l.textAlignment = .center
-        l.backgroundColor = SNCTheme.warmAmber
-        l.translatesAutoresizingMaskIntoConstraints = false
-        return l
-    }()
-
     // Tappable banner shown when UpdateChecker finds a newer App Store version.
     // Opens the App Store page — iOS (App Store distribution) gives no silent
     // download/install path, so this is the full extent of the "update" UI.
@@ -249,9 +237,7 @@ final class ConnectionViewController: UIViewController {
     }()
 
     private var pollTimer: Timer?
-    private var tokenRefreshTimer: Timer?
     private var trafficTimer: Timer?
-    private var pendingWildcatReconnect = false
     private var mainStackCenterY: NSLayoutConstraint!
 
     // Baseline for edge-detecting a genuine transition INTO .connected (not
@@ -290,7 +276,7 @@ final class ConnectionViewController: UIViewController {
 
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0"
         lblVersion.text = "v\(version)"
-        SLog("ConnectionVC: viewDidLoad v\(version) wildcatEnabled=\(VPNManager.shared.wildcatEnabled)")
+        SLog("ConnectionVC: viewDidLoad v\(version)")
 
         let hasKey = VPNManager.shared.loadKey().map { !$0.isEmpty } ?? false
         SLog("ConnectionVC: hasKey=\(hasKey), initialStatus=\(VPNManager.shared.connectionStatus.rawValue)")
@@ -358,10 +344,6 @@ final class ConnectionViewController: UIViewController {
         super.viewWillAppear(animated)
         startPoll()
         updateUI()
-        // Restart token refresh timer if WildCat is enabled and no timer is running.
-        if VPNManager.shared.wildcatEnabled && tokenRefreshTimer == nil {
-            startTokenRefresh()
-        }
         if VPNManager.shared.connectionStatus == .connected {
             startTrafficTimer()
         }
@@ -371,8 +353,6 @@ final class ConnectionViewController: UIViewController {
         super.viewWillDisappear(animated)
         stopPoll()
         stopTrafficTimer()
-        // Token refresh timer keeps running while the app is active; stops only
-        // when WildCat is disabled or the VC is deallocated.
     }
 
     // MARK: - Layout
@@ -402,13 +382,12 @@ final class ConnectionViewController: UIViewController {
         actionStack.alignment = .center
         actionStack.translatesAutoresizingMaskIntoConstraints = false
 
-        let mainStack = UIStackView(arrangedSubviews: [imgState, lblStatus, ribbonWildCat, ribbonUpdate, keyStack, haveKeyStack, credentialStack, actionStack])
+        let mainStack = UIStackView(arrangedSubviews: [imgState, lblStatus, ribbonUpdate, keyStack, haveKeyStack, credentialStack, actionStack])
         mainStack.axis = .vertical
         mainStack.spacing = 20
         mainStack.alignment = .center
         mainStack.setCustomSpacing(12, after: imgState)
         mainStack.setCustomSpacing(0, after: lblStatus)
-        mainStack.setCustomSpacing(8, after: ribbonWildCat)
         mainStack.setCustomSpacing(28, after: ribbonUpdate)
         mainStack.translatesAutoresizingMaskIntoConstraints = false
 
@@ -434,10 +413,6 @@ final class ConnectionViewController: UIViewController {
 
             imgState.widthAnchor.constraint(equalToConstant: 96),
             imgState.heightAnchor.constraint(equalToConstant: 96),
-
-            ribbonWildCat.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            ribbonWildCat.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            ribbonWildCat.heightAnchor.constraint(equalToConstant: 36),
 
             ribbonUpdate.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             ribbonUpdate.trailingAnchor.constraint(equalTo: view.trailingAnchor),
@@ -506,19 +481,14 @@ final class ConnectionViewController: UIViewController {
     // MARK: - Menu
 
     private func buildMenu() {
-        let wildcatOn = VPNManager.shared.wildcatEnabled
-
+        // Plain info action now, not a mode toggle -- WildCat (VK-relay
+        // whitelist-bypass transport) moved out into its own standalone app
+        // (see showWildcatInfo). No .on/.off state; this just opens a panel.
         let wildcatAction = UIAction(
             title: L.t("menu.wildcat"),
-            image: UIImage(systemName: "pawprint"),
-            state: wildcatOn ? .on : .off
+            image: UIImage(systemName: "pawprint")
         ) { [weak self] _ in
-            guard let self else { return }
-            if VPNManager.shared.wildcatEnabled {
-                self.disableWildcat()
-            } else {
-                self.showWildcatWarning { self.enableWildcat() }
-            }
+            self?.showWildcatInfo()
         }
 
         let logsAction = UIAction(
@@ -619,13 +589,7 @@ final class ConnectionViewController: UIViewController {
         doConnect()
     }
 
-    // Starts the tunnel. WildCat credential acquisition (if enabled and the
-    // cached token is missing/stale) happens elsewhere; the toggle itself is
-    // unconditional here.
     private func doConnect() {
-        let wildcatOn = VPNManager.shared.wildcatEnabled
-        let hasToken  = VPNManager.shared.storedWildcatToken() != nil
-        log.info("doConnect: wildcat=\(wildcatOn), hasToken=\(hasToken)")
         connectAndReport()
     }
 
@@ -756,7 +720,7 @@ final class ConnectionViewController: UIViewController {
     @objc private func vpnStatusChanged() {
         DispatchQueue.main.async {
             let status = VPNManager.shared.connectionStatus
-            self.log.info("vpnStatusChanged: status=\(status.rawValue), pendingReconnect=\(self.pendingWildcatReconnect)")
+            self.log.info("vpnStatusChanged: status=\(status.rawValue)")
 
             // Genuine transition into the fully-connected state (not merely
             // re-observing "still connected" on a later notification) --
@@ -772,15 +736,6 @@ final class ConnectionViewController: UIViewController {
                 self.stopTrafficTimer()
             }
             self.lastKnownStatus = status
-
-            if self.pendingWildcatReconnect, status == .disconnected {
-                self.pendingWildcatReconnect = false
-                if (VPNManager.shared.loadKey() ?? "").isEmpty == false {
-                    self.log.info("vpnStatusChanged: auto-reconnecting after WildCat toggle")
-                    self.doConnect()
-                }
-                return
-            }
             self.updateUI()
         }
     }
@@ -814,63 +769,22 @@ final class ConnectionViewController: UIViewController {
         UIApplication.shared.open(update.storeURL)
     }
 
-    // MARK: - WildCat enable / disable
+    // MARK: - WildCat info panel
 
-    // Toggle is unconditional — no credential gate at toggle time.
-    // A token is acquired at connect time (doConnect), matching Android/macOS/Windows behavior.
-    private func enableWildcat() {
-        log.info("enableWildcat: status=\(VPNManager.shared.connectionStatus.rawValue)")
-        VPNManager.shared.setWildcat(true)
-        startTokenRefresh()
-        buildMenu()
-        updateUI()
-        let s = VPNManager.shared.connectionStatus
-        if s == .connected || s == .connecting {
-            log.info("enableWildcat: disconnecting for reconnect")
-            pendingWildcatReconnect = true
-            VPNManager.shared.disconnect()
-        }
-    }
-
-    private func showWildcatWarning(onConfirm: @escaping () -> Void) {
+    /// WildCat (the old VK-relay whitelist-bypass transport built into this
+    /// app) moved out into its own standalone app, 2026-10. This menu entry
+    /// no longer toggles a mode -- it just points at where that
+    /// functionality lives now, with an optional one-tap download.
+    private func showWildcatInfo() {
         let alert = UIAlertController(
-            title: L.t("wildcat.warning.title"),
-            message: L.t("wildcat.warning.message"),
+            title: L.t("wildcat.info.title"),
+            message: L.t("wildcat.info.message"),
             preferredStyle: .alert)
-        alert.addAction(UIAlertAction(title: L.t("common.ok"), style: .default) { _ in onConfirm() })
+        alert.addAction(UIAlertAction(title: L.t("wildcat.info.download"), style: .default) { _ in
+            UIApplication.shared.open(URL(string: "https://apps.navlink.net")!)
+        })
+        alert.addAction(UIAlertAction(title: L.t("common.cancel"), style: .cancel))
         present(alert, animated: true)
-    }
-
-    private func disableWildcat() {
-        log.info("disableWildcat: status=\(VPNManager.shared.connectionStatus.rawValue)")
-        stopTokenRefresh()
-        VPNManager.shared.setWildcat(false)
-        buildMenu()
-        updateUI()
-        let s = VPNManager.shared.connectionStatus
-        if s == .connected || s == .connecting {
-            log.info("disableWildcat: disconnecting for reconnect")
-            pendingWildcatReconnect = true
-            VPNManager.shared.disconnect()
-        }
-    }
-
-    // MARK: - Token refresh
-
-    private func startTokenRefresh() {
-        stopTokenRefresh()
-        tokenRefreshTimer = Timer.scheduledTimer(withTimeInterval: 10 * 60, repeats: true) { [weak self] _ in
-            self?.performTokenRefresh()
-        }
-    }
-
-    private func stopTokenRefresh() {
-        tokenRefreshTimer?.invalidate()
-        tokenRefreshTimer = nil
-    }
-
-    private func performTokenRefresh() {
-        log.info("performTokenRefresh: starting silent refresh")
     }
 
     // MARK: - Polling
@@ -935,14 +849,12 @@ final class ConnectionViewController: UIViewController {
     private func updateUI() {
         let neStatus      = VPNManager.shared.connectionStatus
         let tunnelState   = VPNManager.shared.tunnelState
-        let wildcat       = VPNManager.shared.wildcatEnabled
         var hasKey        = !(VPNManager.shared.loadKey() ?? "").isEmpty
 
         let connected     = neStatus == .connected
         let connecting    = neStatus == .connecting || neStatus == .reasserting
         let disconnecting = neStatus == .disconnecting
         let keyDenied     = tunnelState == "key_denied"
-        let wildcatExpired = tunnelState == "wildcat_auth_expired"
         let busy          = connected || connecting
 
         // Clearing the saved key is what actually gets the user back to a
@@ -959,9 +871,6 @@ final class ConnectionViewController: UIViewController {
             hasKey = false
         }
 
-        // WildCat ribbon
-        ribbonWildCat.isHidden = !(busy && wildcat)
-
         // Update-available ribbon — tap opens the App Store page (see UpdateChecker).
         if let update = UpdateChecker.shared.availableUpdate {
             ribbonUpdate.text = String(format: L.t("status.updateAvailable"), update.version)
@@ -973,10 +882,8 @@ final class ConnectionViewController: UIViewController {
         // Status image
         let imageName: String
         switch true {
-        case keyDenied, wildcatExpired:
+        case keyDenied:
             imageName = "snc_error"
-        case connected && wildcat:
-            imageName = "snc_wildcat"
         case connected:
             imageName = "snc_connected"
         case connecting || disconnecting:
@@ -992,8 +899,7 @@ final class ConnectionViewController: UIViewController {
         // Status text
         lblStatus.text = {
             if keyDenied      { return L.t("status.keyRejected") }
-            if wildcatExpired { return L.t("status.wildcatExpired") }
-            if connected      { return wildcat ? L.t("status.connectedWildcat") : L.t("status.connected") }
+            if connected      { return L.t("status.connected") }
             if connecting    { return L.t("status.connecting") }
             if disconnecting { return L.t("status.disconnecting") }
             return hasKey ? L.t("status.tapConnect") : L.t("status.enterKey")

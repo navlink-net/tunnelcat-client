@@ -7,8 +7,7 @@ import WebKit
 
 /// In-app browser.
 ///
-/// Normal mode: WKWebView loads directly — traffic goes through the active VPN tunnel.
-/// WildCat mode: same path; WildCat transport is transparent to WKWebView.
+/// WKWebView loads directly — traffic goes through the active VPN tunnel.
 ///
 /// Tab state is persisted to the shared App Group UserDefaults so it survives
 /// app restarts.

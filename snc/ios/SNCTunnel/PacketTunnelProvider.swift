@@ -35,8 +35,6 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             return
         }
 
-        let wildcatOn = shared.bool(forKey: SharedDefaultsKey.wildcatOn)
-        // Clear any stale terminal state (e.g. wildcat_auth_expired) from a previous failure.
         shared.set("connecting", forKey: SharedDefaultsKey.tunnelState)
 
         // 1. Configure virtual interface: 10.0.0.2/32, DNS 8.8.8.8, MTU 1280.
@@ -98,7 +96,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             // rule, boot, etc.) -- feeds the admin dashboard's connection-stats
             // feature (see core.ConnStatsCollector).
             let manual = (options?["manual"] as? Bool) ?? false
-            self.launchGoCore(tunFD: self.goBridgeFD, key: key, wildcatOn: wildcatOn,
+            self.launchGoCore(tunFD: self.goBridgeFD, key: key,
                               manual: manual, completionHandler: completionHandler)
         }
     }
@@ -131,28 +129,9 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         case .status:
             completionHandler?(GoCore.statusData())
 
-        case .setWildcat:
-            let on = cmd.value ?? false
-            os_log("handleAppMessage: setWildcat=%d", log: log, type: .info, on ? 1 : 0)
-            GoCore.setWildcat(on)
-            shared.set(on, forKey: SharedDefaultsKey.wildcatOn)
-            completionHandler?(GoCore.statusData())
-
         case .reconnect:
             os_log("handleAppMessage: reconnect", log: log, type: .info)
             GoCore.reconnect()
-            completionHandler?(GoCore.statusData())
-
-        case .setWildcatToken:
-            if let token = cmd.token, !token.isEmpty {
-                os_log("handleAppMessage: setWildcatToken len=%d", log: log, type: .info, token.count)
-                GoCore.setWildcatToken(token)
-                let expiry = Date().addingTimeInterval(18 * 60).timeIntervalSince1970
-                shared.set(token, forKey: SharedDefaultsKey.wildcatToken)
-                shared.set(expiry,  forKey: SharedDefaultsKey.wildcatTokenExpiry)
-            } else {
-                os_log("handleAppMessage: setWildcatToken — empty token ignored", log: log, type: .info)
-            }
             completionHandler?(GoCore.statusData())
 
         case .getLogUploadPref:
@@ -170,7 +149,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
     // MARK: - Private
 
-    private func launchGoCore(tunFD: Int32, key: String, wildcatOn: Bool, manual: Bool,
+    private func launchGoCore(tunFD: Int32, key: String, manual: Bool,
                               completionHandler: @escaping (Error?) -> Void) {
         os_log("bridge fd=%d", log: log, type: .info, tunFD)
 
@@ -181,18 +160,10 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         try? FileManager.default.createDirectory(at: logDir,  withIntermediateDirectories: true)
         try? FileManager.default.createDirectory(at: dataDir, withIntermediateDirectories: true)
         SwiftLog.shared.setup(logDir: logDir)
-        SwiftLog.shared.log("PacketTunnelProvider: startTunnel wildcatOn=\(wildcatOn) key=\(key.prefix(8))…")
-
-        if wildcatOn {
-            let token = shared.string(forKey: SharedDefaultsKey.wildcatToken) ?? ""
-            let expiry = shared.double(forKey: SharedDefaultsKey.wildcatTokenExpiry)
-            if !token.isEmpty && expiry > 0 && Date().timeIntervalSince1970 < expiry {
-                GoCore.setWildcatToken(token)
-            }
-        }
+        SwiftLog.shared.log("PacketTunnelProvider: startTunnel key=\(key.prefix(8))…")
 
         let ok = GoCore.start(key: key, logDir: logDir, dataDir: dataDir,
-                              tunFD: tunFD, wildcatMode: wildcatOn, manual: manual)
+                              tunFD: tunFD, manual: manual)
         guard ok else {
             os_log("GoCore.start returned false", log: log, type: .error)
             completionHandler(TunnelError.coreStartFailed)
@@ -220,14 +191,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                 // the dialer pool was built, so this balances it -- see
                 // ConnStatsCollector).
                 GoCore.stop(manual: false)
-                if errMsg.contains("no access token") {
-                    os_log("tunnel failed: WildCat token missing/expired", log: self.log, type: .error)
-                    SwiftLog.shared.log("PacketTunnelProvider: WildCat auth failed — no access token, surfacing wildcat_auth_expired")
-                    self.shared.set("wildcat_auth_expired", forKey: SharedDefaultsKey.tunnelState)
-                    completionHandler(TunnelError.wildcatAuthExpired)
-                } else {
-                    completionHandler(TunnelError.connectTimeout)
-                }
+                completionHandler(TunnelError.connectTimeout)
             }
         }
     }
@@ -353,15 +317,14 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 // MARK: - Errors
 
 enum TunnelError: LocalizedError {
-    case noKey, noTunFD, coreStartFailed, connectTimeout, wildcatAuthExpired
+    case noKey, noTunFD, coreStartFailed, connectTimeout
 
     var errorDescription: String? {
         switch self {
-        case .noKey:              return "No subscription key configured"
-        case .noTunFD:            return "Could not obtain tunnel file descriptor"
-        case .coreStartFailed:    return "Tunnel core failed to initialize"
-        case .connectTimeout:     return "Connection timed out — check your key and network"
-        case .wildcatAuthExpired: return "WildCat session expired — please reopen the app to log in again"
+        case .noKey:           return "No subscription key configured"
+        case .noTunFD:         return "Could not obtain tunnel file descriptor"
+        case .coreStartFailed: return "Tunnel core failed to initialize"
+        case .connectTimeout:  return "Connection timed out — check your key and network"
         }
     }
 }

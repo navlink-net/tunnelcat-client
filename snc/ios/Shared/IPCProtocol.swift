@@ -10,30 +10,23 @@ import Foundation
 /// NETunnelProviderSession.sendProviderMessage(_:responseHandler:).
 struct IPCCommand: Codable {
     let cmd: Command
-    /// Generic boolean argument (used by setWildcat).
+    /// Generic boolean argument (used by setLogUploadPref).
     let value: Bool?
-    /// String payload (used by setWildcatToken).
-    let token: String?
 
     enum Command: String, Codable {
-        case status      // request current status
-        case setWildcat  // value = true/false
-        case reconnect   // trigger pool rebuild
-        case setWildcatToken  // token = WildCat access token string
-        case getLogUploadPref // fetch this account's log-upload preference (see docs/LOG_UPLOAD_PRIVACY.md)
-        case setLogUploadPref // value = true/false; set this account's own preference
+        case status            // request current status
+        case reconnect         // trigger pool rebuild
+        case getLogUploadPref  // fetch this account's log-upload preference (see docs/LOG_UPLOAD_PRIVACY.md)
+        case setLogUploadPref  // value = true/false; set this account's own preference
     }
 
-    init(cmd: Command, value: Bool? = nil, token: String? = nil) {
+    init(cmd: Command, value: Bool? = nil) {
         self.cmd = cmd
         self.value = value
-        self.token = token
     }
 
     static func status()                 -> IPCCommand { .init(cmd: .status)                  }
-    static func setWildcat(_ on: Bool)   -> IPCCommand { .init(cmd: .setWildcat, value: on)   }
     static func reconnect()              -> IPCCommand { .init(cmd: .reconnect)               }
-    static func setWildcatToken(_ t: String)  -> IPCCommand { .init(cmd: .setWildcatToken, token: t)    }
     static func getLogUploadPref()       -> IPCCommand { .init(cmd: .getLogUploadPref)        }
     static func setLogUploadPref(_ on: Bool) -> IPCCommand { .init(cmd: .setLogUploadPref, value: on) }
 }
@@ -99,9 +92,6 @@ struct IPCReply: Codable {
 
 enum SharedDefaultsKey {
     static let key           = "snc_key"                 // subscription key string
-    static let wildcatOn     = "snc_wildcat"             // Bool
     static let tunnelState   = "snc_tunnel_state"        // last-known state string
-    static let wildcatToken       = "snc_wildcat_token"            // String: WildCat access token
-    static let wildcatTokenExpiry = "snc_wildcat_token_expiry"     // Double: timeIntervalSince1970
     static let logUploadCache = "snc_log_upload_cache"   // Bool: last-known log-upload preference (see docs/LOG_UPLOAD_PRIVACY.md); absent = never fetched, treated as true
 }

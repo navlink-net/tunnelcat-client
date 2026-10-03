@@ -4,18 +4,14 @@
 
 import Foundation
 
-/// Generates background HTTPS requests to camouflage VPN traffic.
-///
-/// In WildCat mode: targets popular Russian sites to make the traffic profile
-/// look like ordinary Russian browsing.
-/// In normal mode: targets global CDNs (jsDelivr, Cloudflare, Google Fonts, …).
+/// Generates background HTTPS requests to camouflage VPN traffic, targeting
+/// global CDNs (jsDelivr, Cloudflare, Google Fonts, …).
 ///
 /// Inside NEPacketTunnelProvider, URLSession connections are NOT subject to the
 /// VPN tunnel — they go directly through the physical interface. This gives us
 /// the same effect as VpnService.protect() on Android without any special setup.
 final class DecoyTraffic {
     private var timer: DispatchSourceTimer?
-    private let wildcatMode: Bool
     private lazy var session: URLSession = {
         let cfg = URLSessionConfiguration.default
         cfg.timeoutIntervalForRequest = 10
@@ -23,16 +19,7 @@ final class DecoyTraffic {
         return URLSession(configuration: cfg)
     }()
 
-    // Russian sites (WildCat mode) — mirrors DecoyTraffic.kt
-    private let wildcatTargets: [URL] = [
-        "https://ok.ru/", "https://gosuslugi.ru/",
-        "https://sberbank.ru/", "https://yandex.ru/", "https://mail.ru/",
-        "https://avito.ru/", "https://ozon.ru/", "https://rbc.ru/",
-        "https://tass.ru/", "https://kommersant.ru/", "https://lenta.ru/",
-        "https://mos.ru/", "https://nalog.gov.ru/", "https://cbr.ru/",
-    ].compactMap(URL.init)
-
-    // Global CDNs (normal mode) — mirrors core/decoy.go CDN pool
+    // Global CDNs — mirrors core/decoy.go CDN pool
     private let normalTargets: [URL] = [
         "https://cdn.jsdelivr.net/npm/bootstrap@5/dist/js/bootstrap.min.js",
         "https://cdnjs.cloudflare.com/ajax/libs/jquery/3.7.1/jquery.min.js",
@@ -46,10 +33,6 @@ final class DecoyTraffic {
         "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/116.0.5845.103 Mobile/15E148 Safari/604.1",
         "Mozilla/5.0 (iPhone; CPU iPhone OS 17_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Mobile/15E148 Safari/604.1",
     ]
-
-    init(wildcatMode: Bool) {
-        self.wildcatMode = wildcatMode
-    }
 
     func start() {
         let t = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .background))
@@ -73,9 +56,8 @@ final class DecoyTraffic {
     }
 
     private func fire() {
-        let targets = wildcatMode ? wildcatTargets : normalTargets
-        guard !targets.isEmpty else { return }
-        let url = targets.randomElement()!
+        guard !normalTargets.isEmpty else { return }
+        let url = normalTargets.randomElement()!
         var req = URLRequest(url: url)
         req.httpMethod = "GET"
         req.setValue(userAgents.randomElement()!, forHTTPHeaderField: "User-Agent")

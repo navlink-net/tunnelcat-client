@@ -9,12 +9,10 @@
 //
 // Exported C entry points (called from Swift via bridging header):
 //
-//	SNCStart(key, logDir, dataDir, tunFD, wildcatMode) â†’ int32 (0 = ok, -1 = err)
+//	SNCStart(key, logDir, dataDir, tunFD) â†’ int32 (0 = ok, -1 = err)
 //	SNCStop()
 //	SNCGetStatus() â†’ *char  (JSON; free with SNCFreeString)
 //	SNCFreeString(*char)
-//	SNCSetWildcat(int32)
-//	SNCSetWildcatToken(*char)   â€” set the access token used by WildCat mode
 //	SNCReconnect()
 //
 // The tunnel runs inside the NEPacketTunnelProvider process. iOS automatically
@@ -57,13 +55,11 @@ const (
 )
 
 var (
-	gState        atomic.Int32
-	gErrorMsg     atomic.Value // string
-	gStopCh       chan struct{}
-	gMu           sync.Mutex
-	gWildcat      atomic.Int32 // 1 = WildCat mode, toggled via the IPC surface
-	gWildcatToken atomic.Value // string, pushed via SNCSetWildcatToken
-	gReconnectCh  = make(chan struct{}, 1)
+	gState       atomic.Int32
+	gErrorMsg    atomic.Value // string
+	gStopCh      chan struct{}
+	gMu          sync.Mutex
+	gReconnectCh = make(chan struct{}, 1)
 
 	gPool     *snc.DialerPool
 	gDecoy    *snc.DecoyManager
@@ -102,7 +98,7 @@ var (
 // â”€â”€ Exported C entry points â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 //export SNCStart
-func SNCStart(cKey, cLogDir, cDataDir *C.char, tunFD C.int, wildcatMode C.int, manual C.int) C.int {
+func SNCStart(cKey, cLogDir, cDataDir *C.char, tunFD C.int, manual C.int) C.int {
 	gMu.Lock()
 	defer gMu.Unlock()
 
@@ -133,9 +129,6 @@ func SNCStart(cKey, cLogDir, cDataDir *C.char, tunFD C.int, wildcatMode C.int, m
 	gLogDir = logDir
 	gDataDir = dataDir
 	gTunFD = int(tunFD)
-	if wildcatMode != 0 {
-		gWildcat.Store(1)
-	}
 
 	gStopCh = make(chan struct{})
 	gState.Store(stateConnecting)
@@ -198,26 +191,6 @@ func SNCGetStatus() *C.char {
 //export SNCFreeString
 func SNCFreeString(s *C.char) {
 	C.free(unsafe.Pointer(s))
-}
-
-//export SNCSetWildcat
-func SNCSetWildcat(enabled C.int) {
-	if enabled != 0 {
-		gWildcat.Store(1)
-	} else {
-		gWildcat.Store(0)
-	}
-	select {
-	case gReconnectCh <- struct{}{}:
-	default:
-	}
-}
-
-//export SNCSetWildcatToken
-func SNCSetWildcatToken(cToken *C.char) {
-	if cToken != nil {
-		gWildcatToken.Store(C.GoString(cToken))
-	}
 }
 
 //export SNCReconnect
@@ -702,10 +675,7 @@ func runTunnel(stopCh <-chan struct{}) {
 		}()
 	}
 
-	// In WildCat mode all direct TCP to control nodes is blocked â€” skip data-plane probe.
-	if gWildcat.Load() == 0 {
-		router.ProbeDataPlane(5 * time.Second)
-	}
+	router.ProbeDataPlane(5 * time.Second)
 	router.BuildPaths()
 
 	dataFailCh := make(chan struct{}, 1)
@@ -1172,13 +1142,6 @@ func runTunnel(stopCh <-chan struct{}) {
 	}
 	if gConnStats != nil {
 		gConnStats.IncConnect(gManualConnect.Load() != 0)
-		// WildCat mode is decided once, at connect time (SNCStart's
-		// wildcatMode param / SNCSetWildcat before connect) -- not something
-		// that flips mid-session, so it's safe to read here to start the
-		// session-duration clock.
-		if gWildcat.Load() != 0 {
-			gConnStats.StartWildcatSession()
-		}
 	}
 
 	// SOCKS5 listener.
@@ -1191,15 +1154,7 @@ func runTunnel(stopCh <-chan struct{}) {
 	gSocksLn = socksLn
 	snc.Log.Printf("snc-core-ios: SOCKS5 at %s", socksLn.Addr())
 
-	bypassForSocks5 := gBypass
-	if gWildcat.Load() != 0 {
-		bypassForSocks5 = nil
-	}
-	socks5 := snc.NewSOCKS5ServerWithPool("", pool, bypassForSocks5)
-	// DNS goes through the tunnel in WildCat mode too (2026-08-12: flipped
-	// from the old "bypass to avoid relay latency" default -- see the same
-	// change in the other platform clients for the full reasoning). No
-	// WildcatDNS assignment needed here any more; false is the zero value.
+	socks5 := snc.NewSOCKS5ServerWithPool("", pool, gBypass)
 	gSocks5 = socks5
 	go socks5.Serve(socksLn) //nolint:errcheck
 
@@ -1214,10 +1169,8 @@ func runTunnel(stopCh <-chan struct{}) {
 
 	// Decoy traffic.
 	decoyMgr := snc.NewDecoyManager("")
-	if gWildcat.Load() == 0 {
-		pool.SetActivityHook(decoyMgr.MarkActivity)
-		decoyMgr.Start()
-	}
+	pool.SetActivityHook(decoyMgr.MarkActivity)
+	decoyMgr.Start()
 	gDecoy = decoyMgr
 
 	// Log upload: ship recent logs straight to the arbiter (navlink.net)
@@ -1231,9 +1184,7 @@ func runTunnel(stopCh <-chan struct{}) {
 			}
 			return gPool.Pick()
 		},
-		func() bool {
-			return gWildcat.Load() != 0
-		},
+		nil,
 	)
 	defer logUploader.Stop()
 
@@ -1247,9 +1198,7 @@ func runTunnel(stopCh <-chan struct{}) {
 			}
 			return gPool.Pick()
 		},
-		func() bool {
-			return gWildcat.Load() != 0
-		},
+		nil,
 	)
 	defer connStatsUploader.Stop()
 
@@ -1284,40 +1233,10 @@ func runTunnel(stopCh <-chan struct{}) {
 		}
 	}
 
-	// WildCat stall watchdog: if the covert-relay session dies and pool.manage()
-	// cannot recover within its backoff window, signal the NE to restart the
-	// tunnel with a clean slate. 24 ticks Ã— 5s = 2 minutes of silence triggers stop.
-	const wildcatStallTicks = 24
-	go func() {
-		ticker := time.NewTicker(5 * time.Second)
-		defer ticker.Stop()
-		deadTicks := 0
-		for {
-			select {
-			case <-stopCh:
-				return
-			case <-ticker.C:
-			}
-			if gWildcat.Load() == 0 {
-				deadTicks = 0
-				continue
-			}
-			if deadTicks >= wildcatStallTicks {
-				snc.Log.Printf("snc-core-ios: WildCat watchdog: no live TURN sessions for %s â€” stopping tunnel",
-					time.Duration(deadTicks)*5*time.Second)
-				gState.Store(stateError)
-				gErrorMsg.Store("WildCat stall â€” restarting")
-				SNCStop()
-				return
-			}
-		}
-	}()
-
-	// Data-plane watchdog (non-WildCat mode; WildCat has its own stall watchdog
-	// above). 2026-08-06: found and fixed on Android after a real incident where
-	// the tunnel reported HTTP 200 to every POST but carried near-zero real
-	// payload for minutes with nothing to detect or recover from it; the same
-	// gap existed here (only the WildCat branch had a watchdog).
+	// Data-plane watchdog. 2026-08-06: found and fixed on Android after a real
+	// incident where the tunnel reported HTTP 200 to every POST but carried
+	// near-zero real payload for minutes with nothing to detect or recover
+	// from it; the same gap existed here.
 	//
 	// Same day, second incident: the first version of this fix used
 	// pool.LastDataTime() (only sees dialers currently in pool.slots) for the
@@ -1341,9 +1260,6 @@ func runTunnel(stopCh <-chan struct{}) {
 			case <-stopCh:
 				return
 			case <-ticker.C:
-			}
-			if gWildcat.Load() != 0 {
-				continue
 			}
 			if snc.TunnelMonitor.IsStuck() {
 				snc.Log.Printf("snc-core-ios: watchdog: tunnel one-sided (sent but no real data received) â€” restarting tunnel from scratch")
@@ -1394,22 +1310,16 @@ func runTunnel(stopCh <-chan struct{}) {
 			case <-gReconnectCh:
 				snc.Log.Printf("snc-core-ios: reconnect triggered")
 				pool.DrainEvictions()
-				if gWildcat.Load() == 0 {
-					router.ProbeDataPlane(5 * time.Second)
-				}
+				router.ProbeDataPlane(5 * time.Second)
 				router.BuildPaths()
 				if nd := buildPoolDialers(); nd != nil {
 					pool.Swap(nd)
 				}
-				// DNS always goes through the tunnel now, WildCat or not — see
-				// the comment where socks5 is constructed above.
 				resetTimer(refreshFast)
 
 			case <-dataFailCh:
 				pool.DrainEvictions()
-				if gWildcat.Load() == 0 {
-					router.ProbeDataPlane(5 * time.Second)
-				}
+				router.ProbeDataPlane(5 * time.Second)
 				router.BuildPaths()
 				if nd := buildPoolDialers(); nd != nil {
 					pool.Swap(nd)
@@ -1426,12 +1336,9 @@ func runTunnel(stopCh <-chan struct{}) {
 						continue
 					}
 				}
-				isWildcat := gWildcat.Load() != 0
-				noAliveControls := !isWildcat && len(router.QualifyingControlAddrs()) == 0
+				noAliveControls := len(router.QualifyingControlAddrs()) == 0
 				if pool.DrainEvictions() > 0 || noAliveControls {
-					if !isWildcat {
-						router.ProbeDataPlane(5 * time.Second)
-					}
+					router.ProbeDataPlane(5 * time.Second)
 					resetTimer(refreshFast)
 				} else {
 					next := interval * 3 / 2
@@ -1446,7 +1353,7 @@ func runTunnel(stopCh <-chan struct{}) {
 					snc.Log.Printf("snc-core-ios: pool: no viable controls this cycle â€” keeping current pool")
 				} else {
 					// Guard against single bad probe collapsing pool to 1 dialer.
-					if !isWildcat && len(newDialers) <= 1 && pool.Size() > 1 {
+					if len(newDialers) <= 1 && pool.Size() > 1 {
 						snc.Log.Printf("snc-core-ios: pool shrink %dâ†’%d, stabilising", pool.Size(), len(newDialers))
 						select {
 						case <-poolRefreshStop:
@@ -1560,10 +1467,8 @@ func runTunnel(stopCh <-chan struct{}) {
 					}
 					dhtNode.SaveRelays(dhtRelaysPath) //nolint:errcheck
 					router.MergeDHTRelays(entries)
-					if gWildcat.Load() == 0 {
-						router.ProbeDataPlane(3 * time.Second)
-						router.BuildPaths()
-					}
+					router.ProbeDataPlane(3 * time.Second)
+					router.BuildPaths()
 					blockedCtrls := router.UnreachableControls()
 					if len(blockedCtrls) == 0 {
 						continue
