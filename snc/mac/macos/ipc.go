@@ -19,14 +19,13 @@ type IPCMsg struct {
 	T string `json:"t"`
 
 	// "init" — sent once after socket connect
-	Version        string `json:"version,omitempty"`
-	InitLogin      bool   `json:"init_login,omitempty"`
-	AutoConnect    bool   `json:"auto_connect,omitempty"`
-	DOH            bool   `json:"doh,omitempty"`
-	BlockQUIC      bool   `json:"block_quic,omitempty"`
-	Region         string `json:"region,omitempty"`
-	LogDir         string `json:"log_dir,omitempty"`
-	WildcatEnabled bool   `json:"wildcat_enabled,omitempty"` // current WildCat state (persisted in daemon)
+	Version     string `json:"version,omitempty"`
+	InitLogin   bool   `json:"init_login,omitempty"`
+	AutoConnect bool   `json:"auto_connect,omitempty"`
+	DOH         bool   `json:"doh,omitempty"`
+	BlockQUIC   bool   `json:"block_quic,omitempty"`
+	Region      string `json:"region,omitempty"`
+	LogDir      string `json:"log_dir,omitempty"`
 
 	// "status" — state machine update
 	// State: "idle" | "pending" | "connected" | "error" | "login_error"
@@ -40,10 +39,6 @@ type IPCMsg struct {
 	Msgs []string `json:"msgs,omitempty"`
 
 	// "ask_key" — main wants a subscription key from the user
-
-	// "wildcat_status" — daemon reports WildCat connect result to tray
-	// (so tray can uncheck the menu item on failure)
-	WildcatOK bool `json:"wildcat_ok,omitempty"`
 
 	// "club_theme" — daemon reports the current club membership theme, once
 	// ClubDiscoverer confirms it (see tunnel_cat/docs/club-membership.md).
@@ -104,10 +99,6 @@ type IPCCmd struct {
 	DOH           bool   `json:"doh,omitempty"`
 	Region        string `json:"region,omitempty"`
 	AutoReconnect bool   `json:"auto_reconnect,omitempty"`
-	// "wildcat" — tray toggles WildCat mode; WildcatToken is non-empty when enabling
-	WildcatEnabled bool   `json:"wildcat_enabled,omitempty"`
-	WildcatToken   string `json:"wildcat_token,omitempty"`
-	// "wildcat_token" — tray pushes a refreshed WildCat access token
 
 	// "recommend" — tray forwards a Cat Club recommendation submitted in the
 	// Settings panel; the daemon holds the session token needed to actually

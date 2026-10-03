@@ -36,15 +36,21 @@ func ShowUpdateAvailableAlert(version string) bool {
 	return err == nil && strings.TrimSpace(string(out)) == nowBtn
 }
 
-// ShowWildcatWarning shows an unconditional informational warning before
-// WildCat mode is enabled -- see doWildcatToggle in tray_darwin.go, which
-// calls this once every time the user turns WildCat on (no state check, no
-// cancel, OK only).
-func ShowWildcatWarning() {
-	script := `display dialog ` + quoteAS(T("wildcat_warning_message")) +
-		` with title ` + quoteAS(T("wildcat_warning_title")) +
-		` buttons {"OK"} default button "OK"`
-	exec.Command("osascript", "-e", script).Run() //nolint:errcheck
+// showWildcatInfo shows an informational panel explaining that whitelist-
+// bypass mode is now a separate app, WildCat -- shown every time the user
+// clicks the WildCat menu item (tray or native menu bar), with the choice
+// to open its download page or just dismiss.
+func showWildcatInfo() {
+	downloadBtn := T("wildcat_info_download")
+	closeBtn := T("wildcat_info_close")
+	script := `button returned of (display dialog ` +
+		quoteAS(T("wildcat_info_message")) +
+		` with title ` + quoteAS(T("wildcat_info_title")) +
+		` buttons {` + quoteAS(closeBtn) + `, ` + quoteAS(downloadBtn) + `} default button ` + quoteAS(downloadBtn) + `)`
+	out, err := exec.Command("osascript", "-e", script).Output()
+	if err == nil && strings.TrimSpace(string(out)) == downloadBtn {
+		exec.Command("open", "https://apps.navlink.net").Run() //nolint:errcheck
+	}
 }
 
 // quoteAS quotes a string for embedding in an AppleScript string literal.

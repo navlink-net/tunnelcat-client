@@ -124,17 +124,17 @@ func NewSNCWindow(
 	for _, name := range []string{
 		"bg.png",
 		"illustration_idle.png", "illustration_connecting.png", "illustration_connected.png",
-		"illustration_wildcat.png", "illustration_error.png",
+		"illustration_error.png",
 		// Club-theme variants (see tunnel_cat/docs/club-membership.md) --
-		// same five states, palette-only variants selected client-side by
+		// same four states, palette-only variants selected client-side by
 		// appending "_catclub"/"_elite" to the filename (see onClubThemeUpdate
 		// in windowHTML's JS below). Registered unconditionally; a regular
 		// (non-member) user's JS just never references these URLs.
 		"illustration_idle_catclub.png", "illustration_connecting_catclub.png",
-		"illustration_connected_catclub.png", "illustration_wildcat_catclub.png",
+		"illustration_connected_catclub.png",
 		"illustration_error_catclub.png",
 		"illustration_idle_elite.png", "illustration_connecting_elite.png",
-		"illustration_connected_elite.png", "illustration_wildcat_elite.png",
+		"illustration_connected_elite.png",
 		"illustration_error_elite.png",
 	} {
 		fmt.Fprintf(os.Stderr, "tray: registering asset %q\n", name)
@@ -260,8 +260,7 @@ func (w *SNCWindow) PushSettings(s AppSettings) {
 	b, _ := json.Marshal(s)
 	windowPushSettings(b)
 	updateReady := globalTray != nil && globalTray.IsUpdateReady()
-	quicLocked := globalTray != nil && globalTray.IsWildcatQUICLocked()
-	windowSyncAppMenu(s.DoH, s.BlockQUIC, s.Wildcat, s.Region, updateReady, quicLocked)
+	windowSyncAppMenu(s.DoH, s.BlockQUIC, s.Region, updateReady)
 }
 
 // PushLogUploadPref encodes p (plus ok) as JSON and calls
@@ -457,7 +456,6 @@ body::before{
 #status-bar.state-disconnected{background:#5b6470}
 #status-bar.state-connecting{background:#e08a2e}
 #status-bar.state-error{background:#c0392b}
-#status-bar.state-wildcat{background:#000}
 
 /* â”€â”€ Live uplink/downlink counter â”€â”€ */
 /* Sits just above #status-bar, bottom-right of the illustration. Hidden by
@@ -549,10 +547,6 @@ body::before{
       <div class="settings-section">
         <h3>{{T:html_settings_connection}}</h3>
         <div class="srow">
-          <div class="srow-label">{{T:html_wildcat_label}}</div>
-          <input type="checkbox" id="s-wildcat" onchange="saveSettings()">
-        </div>
-        <div class="srow">
           <div class="srow-label">{{T:html_doh_label}}</div>
           <input type="checkbox" id="s-doh" onchange="saveSettings()">
         </div>
@@ -605,7 +599,6 @@ window.I18N = {
   error:            "{{T:html_js_error}}",
   disconnecting:    "{{T:html_js_disconnecting}}",
   connecting:       "{{T:html_js_connecting}}",
-  connectedWildcat: "{{T:html_js_connected_wildcat}}",
   connected:        "{{T:html_js_connected}}",
   disconnected:     "{{T:html_js_disconnected}}",
   recommendSentPrefix: "{{T:html_recommend_status_prefix}}"
@@ -623,7 +616,6 @@ function handleDisconnect() { window.webkit.messageHandlers.sncDisconnect.postMe
 
 function saveSettings() {
   window.webkit.messageHandlers.sncSetSettings.postMessage({
-    wildcat:   document.getElementById('s-wildcat').checked,
     doh:       document.getElementById('s-doh').checked,
     blockQUIC: document.getElementById('s-block-quic').checked,
     region:    document.getElementById('s-region').value,
@@ -740,12 +732,11 @@ window.onStatusUpdate = function(s) {
     img.src = catAssetURL('connecting'); return;
   }
   if (s.connected) {
-    var isWildcat = s.mode === 'wildcat';
-    bar.classList.add(isWildcat ? 'state-wildcat' : 'state-connected');
-    bar.textContent = isWildcat ? window.I18N.connectedWildcat : window.I18N.connected;
+    bar.classList.add('state-connected');
+    bar.textContent = window.I18N.connected;
     bcon.style.display = 'none'; bdis.style.display = '';
     if (byteEl) byteEl.style.display = '';
-    img.src = catAssetURL(isWildcat ? 'wildcat' : 'connected');
+    img.src = catAssetURL('connected');
     return;
   }
   bar.classList.add('state-disconnected');
@@ -756,14 +747,9 @@ window.onStatusUpdate = function(s) {
 };
 
 window.onSettingsUpdate = function(s) {
-  document.getElementById('s-wildcat').checked    = !!s.wildcat;
   document.getElementById('s-doh').checked        = !!s.doh;
   document.getElementById('s-block-quic').checked = !!s.blockQUIC;
   document.getElementById('s-region').value       = s.region || '';
-  // WildCat forces QUIC blocked for the session -- hide the row entirely
-  // rather than just greying it (checkbox state above is left untouched,
-  // so it reads correctly again the moment WildCat releases the lock).
-  document.getElementById('s-block-quic-row').style.display = s.quicLocked ? 'none' : '';
 };
 
 // Log-upload preference lives on the account server-side (see

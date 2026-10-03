@@ -86,7 +86,7 @@ func windowPushBytes(b []byte) {
 
 func windowBuildAppMenu() { C.snc_window_build_app_menu() }
 
-func windowSyncAppMenu(doh, quic, wildcat bool, region string, updateReady, quicLocked bool) {
+func windowSyncAppMenu(doh, quic bool, region string, updateReady bool) {
 	boolC := func(v bool) C.int {
 		if v {
 			return 1
@@ -94,7 +94,7 @@ func windowSyncAppMenu(doh, quic, wildcat bool, region string, updateReady, quic
 		return 0
 	}
 	cr := C.CString(region)
-	C.snc_window_sync_app_menu(boolC(doh), boolC(quic), boolC(wildcat), cr, boolC(updateReady), boolC(quicLocked))
+	C.snc_window_sync_app_menu(boolC(doh), boolC(quic), cr, boolC(updateReady))
 	C.free(unsafe.Pointer(cr))
 }
 
@@ -269,8 +269,8 @@ func go_snc_menu_toggle_quic() {
 	}
 }
 
-//export go_snc_menu_toggle_wildcat
-func go_snc_menu_toggle_wildcat() {
+//export go_snc_menu_wildcat_info
+func go_snc_menu_wildcat_info() {
 	if globalTray != nil {
 		select {
 		case globalTray.menuWildcatCh <- struct{}{}:

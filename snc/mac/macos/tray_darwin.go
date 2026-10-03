@@ -111,15 +111,8 @@ type TrayApp struct {
 	mRegionOther   *systray.MenuItem
 	mUpdate        *systray.MenuItem
 	mShareLogs     *systray.MenuItem
-	mWildcat       *systray.MenuItem // WildCat mode toggle
+	mWildcat       *systray.MenuItem // WildCat info-panel item
 	updateNotifyCh chan string
-
-	wildcatEnabled bool
-	// onWildcatChange is called when the user toggles the WildCat menu item.
-	// enabled=true triggers whatever credential acquisition WildCat mode
-	// needs in the tray process; the resulting token (or "" on cancel) is
-	// passed as wildcatToken. enabled=false disables WildCat.
-	onWildcatChange func(enabled bool, wildcatToken string)
 
 	onShareLogs func()
 
@@ -219,14 +212,6 @@ func (a *TrayApp) setTrayIcon(icon []byte, errMsg string) {
 
 // connectedIcon returns the icon for the connected state.
 func (a *TrayApp) connectedIcon() []byte {
-	a.mu.Lock()
-	wc := a.wildcatEnabled
-	a.mu.Unlock()
-	if wc {
-		core.Log.Printf("connectedIcon: wildcatEnabled=true â†’ snc_wildcat.png")
-		return readAsset("snc_wildcat.png")
-	}
-	core.Log.Printf("connectedIcon: wildcatEnabled=false â†’ snc_connected.png")
 	return readAsset("snc_connected.png")
 }
 
@@ -273,75 +258,6 @@ func (a *TrayApp) SetShareLogsCallback(fn func()) {
 	a.mu.Unlock()
 }
 
-// SetWildcatCallback registers a function called when the WildCat menu item
-// is toggled. enabled=true means the user wants WildCat on; the tray should
-// acquire credentials, then call the callback with the resulting token.
-// If acquisition fails or the user cancels, call with enabled=false, wildcatToken="".
-func (a *TrayApp) SetWildcatCallback(fn func(enabled bool, wildcatToken string)) {
-	a.mu.Lock()
-	a.onWildcatChange = fn
-	a.mu.Unlock()
-}
-
-// IsWildcatEnabled reports whether WildCat mode is currently enabled.
-func (a *TrayApp) IsWildcatEnabled() bool {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return a.wildcatEnabled
-}
-
-// IsWildcatQUICLocked reports whether WildCat mode is currently forcing QUIC
-// blocked, for the active/pending session. True only while a WildCat
-// connection is actually connecting or connected -- unblocked UDP:443 QUIC
-// could leak traffic straight past the WildCat relay. The underlying
-// Disable QUIC preference is never touched by this -- callers hide the
-// checkbox instead, so un-hiding it later shows exactly the state it was in
-// before WildCat took over.
-func (a *TrayApp) IsWildcatQUICLocked() bool {
-	a.mu.Lock()
-	active := a.connected || a.connecting
-	wildcat := a.wildcatEnabled
-	a.mu.Unlock()
-	return active && wildcat
-}
-
-// refreshBlockQUICVisibility hides the "Disable QUIC" checkbox while
-// IsWildcatQUICLocked, and shows it again otherwise.
-func (a *TrayApp) refreshBlockQUICVisibility() {
-	if a.mBlockQUIC == nil {
-		return
-	}
-	a.mu.Lock()
-	loggedIn := a.loggedIn
-	a.mu.Unlock()
-	if !loggedIn {
-		return // login/logout flow already hides/shows it directly
-	}
-	if a.IsWildcatQUICLocked() {
-		a.mBlockQUIC.Hide()
-	} else {
-		a.mBlockQUIC.Show()
-	}
-}
-
-// SetWildcatEnabled forces the WildCat menu item into the given state
-// (used when the daemon reports connect failure and the tray must uncheck).
-func (a *TrayApp) SetWildcatEnabled(enabled bool) {
-	core.Log.Printf("SetWildcatEnabled: %v", enabled)
-	a.mu.Lock()
-	a.wildcatEnabled = enabled
-	a.mu.Unlock()
-	if a.mWildcat == nil {
-		return
-	}
-	if enabled {
-		a.mWildcat.Check()
-	} else {
-		a.mWildcat.Uncheck()
-	}
-	a.refreshBlockQUICVisibility()
-}
-
 // SetOpenWindowCallback registers a function called when the user clicks the
 // "Open ShortNerdCat" tray menu item.
 func (a *TrayApp) SetOpenWindowCallback(fn func()) {
@@ -363,7 +279,6 @@ func (a *TrayApp) callStatusChange() {
 	a.mu.Lock()
 	fn := a.onStatusChange
 	a.mu.Unlock()
-	a.refreshBlockQUICVisibility()
 	if fn != nil {
 		go fn()
 	}
@@ -377,7 +292,6 @@ func (a *TrayApp) GetAppStatus() AppStatus {
 	disconnecting := a.disconnecting
 	loggedIn := a.loggedIn
 	at := a.connectedAt
-	wildcat := a.wildcatEnabled
 	errMsg := a.errorMsg
 	a.mu.Unlock()
 
@@ -395,11 +309,6 @@ func (a *TrayApp) GetAppStatus() AppStatus {
 		m := int(since.Minutes()) % 60
 		sec := int(since.Seconds()) % 60
 		s.Elapsed = fmt.Sprintf("%02d:%02d:%02d", h, m, sec)
-		if wildcat {
-			s.Mode = "wildcat"
-		} else {
-			s.Mode = "direct"
-		}
 	}
 	return s
 }
@@ -407,11 +316,9 @@ func (a *TrayApp) GetAppStatus() AppStatus {
 // GetAppSettings returns the current settings for the window UI.
 func (a *TrayApp) GetAppSettings() AppSettings {
 	return AppSettings{
-		DoH:        a.IsDNSOverHTTPSEnabled(),
-		BlockQUIC:  a.IsBlockQUICEnabled(),
-		Region:     a.PreferredRegion(),
-		Wildcat:    a.IsWildcatEnabled(),
-		QUICLocked: a.IsWildcatQUICLocked(),
+		DoH:       a.IsDNSOverHTTPSEnabled(),
+		BlockQUIC: a.IsBlockQUICEnabled(),
+		Region:    a.PreferredRegion(),
 	}
 }
 
@@ -450,9 +357,6 @@ func (a *TrayApp) ApplyWindowSettings(s AppSettings) {
 	}
 	if s.Region != a.PreferredRegion() {
 		a.setRegionByCode(s.Region)
-	}
-	if s.Wildcat != a.IsWildcatEnabled() {
-		go a.doWildcatToggle()
 	}
 }
 
@@ -656,8 +560,8 @@ func (a *TrayApp) onReady() {
 	fmt.Fprintf(os.Stderr, "tray: AddSubMenuItemCheckbox mRegionChina done\n")
 	a.mRegionOther = a.mRegion.AddSubMenuItemCheckbox(T("tray_region_other"), T("tray_region_other_tip"), a.preferredRegion == "XX")
 	fmt.Fprintf(os.Stderr, "tray: AddSubMenuItemCheckbox mRegionOther done\n")
-	a.mWildcat = systray.AddMenuItemCheckbox(T("tray_wildcat"), T("tray_wildcat_tip"), false)
-	fmt.Fprintf(os.Stderr, "tray: AddMenuItemCheckbox mWildcat done\n")
+	a.mWildcat = systray.AddMenuItem(T("tray_wildcat"), T("tray_wildcat_tip"))
+	fmt.Fprintf(os.Stderr, "tray: AddMenuItem mWildcat done\n")
 	systray.AddSeparator()
 	mAbout := systray.AddMenuItem(T("tray_about"), T("tray_about_tip"))
 	fmt.Fprintf(os.Stderr, "tray: AddMenuItem mAbout done\n")
@@ -805,7 +709,7 @@ func (a *TrayApp) onReady() {
 				}
 
 			case <-a.mWildcat.ClickedCh:
-				go a.doWildcatToggle()
+				go showWildcatInfo()
 
 			case <-mQuit.ClickedCh:
 				a.doQuit()
@@ -840,58 +744,13 @@ func (a *TrayApp) onReady() {
 				}
 				a.callStatusChange()
 			case <-a.menuWildcatCh:
-				go a.doWildcatToggle()
+				go showWildcatInfo()
 			case code := <-a.menuRegionCh:
 				a.setRegionByCode(code)
 				a.callStatusChange()
 			}
 		}
 	}()
-}
-
-func (a *TrayApp) doWildcatToggle() {
-	a.mu.Lock()
-	wasEnabled := a.wildcatEnabled
-	connected := a.connected
-	fn := a.onWildcatChange
-	a.mu.Unlock()
-
-	newEnabled := !wasEnabled
-	core.Log.Printf("doWildcatToggle: %v â†’ %v", wasEnabled, newEnabled)
-
-	if newEnabled {
-		// Unconditional one-button warning every time WildCat is turned on --
-		// blocks this goroutine, but doWildcatToggle is always invoked via
-		// `go a.doWildcatToggle()` (see the mWildcat.ClickedCh / menuWildcatCh
-		// cases in onReady and ApplyWindowSettings), never on the systray
-		// event loop itself, so blocking here is safe.
-		ShowWildcatWarning()
-	}
-
-	a.mu.Lock()
-	a.wildcatEnabled = newEnabled
-	a.mu.Unlock()
-
-	if newEnabled {
-		a.mWildcat.Check()
-	} else {
-		a.mWildcat.Uncheck()
-	}
-	if fn != nil {
-		fn(newEnabled, "") // credential acquisition happens at connect time, not here
-	}
-	a.callStatusChange() // push updated settings+status to window
-
-	// If currently connected, disconnect+reconnect to switch relay mode.
-	// Clear userDisconnected so TriggerReconnect isn't suppressed by a previous
-	// manual disconnect (user is explicitly changing mode now).
-	if connected {
-		core.Log.Printf("doWildcatToggle: connected â€” clearing userDisconnected, triggering reconnect")
-		a.mu.Lock()
-		a.userDisconnected = false
-		a.mu.Unlock()
-		a.TriggerReconnect()
-	}
 }
 
 func (a *TrayApp) doLogin() {
@@ -1002,7 +861,6 @@ func (a *TrayApp) doConnect(autoReconnect bool) {
 	a.mu.Unlock()
 	a.callStatusChange()
 
-	core.Log.Printf("doConnect: setting connected icon (wildcatEnabled=%v)", a.wildcatEnabled)
 	a.setTrayIcon(a.connectedIcon(), "")
 	a.mDisconnect.Show()
 
@@ -1378,7 +1236,6 @@ func (a *TrayApp) ApplyIPCStatus(state, msg string) {
 			a.mu.Unlock()
 		}
 		a.callStatusChange()
-		core.Log.Printf("ApplyIPCStatus connected: setting connected icon (wildcatEnabled=%v)", a.wildcatEnabled)
 		a.setTrayIcon(a.connectedIcon(), "")
 		a.mDisconnect.Show()
 		a.mConnect.Hide()

@@ -145,11 +145,6 @@ func runTrayProcess(socketPath string, watchdogRestart bool) {
 	// Register the tray so native menu bar callbacks can reach it.
 	snmac.SetMenuTray(trayApp)
 
-	// Sync WildCat state from daemon — daemon persists it across tray restarts.
-	if init.WildcatEnabled {
-		trayApp.SetWildcatEnabled(true)
-	}
-
 	trayApp.SetShareLogsCallback(func() {
 		exec.Command("/usr/bin/open", logDir).Run() //nolint:errcheck
 	})
@@ -207,11 +202,6 @@ func runTrayProcess(socketPath string, watchdogRestart bool) {
 		fmt.Fprintf(os.Stderr, "tray: calling TriggerLoginIfNeeded\n")
 		trayApp.TriggerLoginIfNeeded()
 		fmt.Fprintf(os.Stderr, "tray: readyCb complete\n")
-	})
-
-	// Wire WildCat callback: tray â†’ daemon.
-	trayApp.SetWildcatCallback(func(enabled bool, wildcatToken string) {
-		sendCmd(snmac.IPCCmd{T: "wildcat", WildcatEnabled: enabled, WildcatToken: wildcatToken})
 	})
 
 	// Read status updates from main in background.
@@ -275,17 +265,6 @@ func runTrayProcess(socketPath string, watchdogRestart bool) {
 						AdminDisabled: msg.LogUploadAdminDisabled,
 						GlobalEnabled: msg.LogUploadGlobalEnabled,
 					})
-				}
-			case "wildcat_status":
-				// Daemon reports WildCat relay connect result.
-				// true  â†’ connected via WildCat relay (confirm checkbox)
-				// false â†’ connected via normal path (daemon may not have had a token yet)
-				//         Do NOT auto-disable checkbox â€” user explicitly enabled WildCat.
-				if msg.WildcatOK {
-					core.Log.Printf("tray: wildcat relay confirmed OK")
-					trayApp.SetWildcatEnabled(true)
-				} else {
-					core.Log.Printf("tray: wildcat relay not used this connect (checkbox stays on)")
 				}
 			}
 		}

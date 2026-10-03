@@ -37,7 +37,7 @@ extern void go_snc_menu_connect(void);
 extern void go_snc_menu_disconnect(void);
 extern void go_snc_menu_toggle_doh(void);
 extern void go_snc_menu_toggle_quic(void);
-extern void go_snc_menu_toggle_wildcat(void);
+extern void go_snc_menu_wildcat_info(void);
 extern void go_snc_menu_region(const char *code);
 extern void go_snc_menu_about(void);
 extern void go_snc_menu_update(void);
@@ -815,7 +815,7 @@ void snc_window_show_credential_login(void) {
 
 static NSMenuItem *sncMenuDoH;
 static NSMenuItem *sncMenuQUIC;
-static NSMenuItem *sncMenuWildcat;
+static NSMenuItem *sncMenuWildcatInfo;
 static NSMenuItem *sncMenuRegionAuto;
 static NSMenuItem *sncMenuRegionRU;
 static NSMenuItem *sncMenuRegionEU;
@@ -834,7 +834,7 @@ static NSMenuItem *sncMenuUpdate;
 - (void)menuDisconnect:(id)sender { go_snc_menu_disconnect(); }
 - (void)menuToggleDoH:(id)sender  { go_snc_menu_toggle_doh(); }
 - (void)menuToggleQUIC:(id)sender { go_snc_menu_toggle_quic(); }
-- (void)menuToggleWildcat:(id)sender { go_snc_menu_toggle_wildcat(); }
+- (void)menuShowWildcatInfo:(id)sender { go_snc_menu_wildcat_info(); }
 - (void)menuRegion:(id)sender {
     NSString *code = [(NSMenuItem *)sender representedObject];
     go_snc_menu_region(code ? [code UTF8String] : "");
@@ -878,7 +878,7 @@ void snc_window_build_app_menu(void) {
             [appMenu addItem:[NSMenuItem separatorItem]];
             sncMenuDoH     = makeItem(appMenu, SNCT("menu_doh"),     @selector(menuToggleDoH:));
             sncMenuQUIC    = makeItem(appMenu, SNCT("menu_quic"),    @selector(menuToggleQUIC:));
-            sncMenuWildcat = makeItem(appMenu, SNCT("menu_wildcat"), @selector(menuToggleWildcat:));
+            sncMenuWildcatInfo = makeItem(appMenu, SNCT("menu_wildcat"), @selector(menuShowWildcatInfo:));
 
             // Region submenu.
             NSMenuItem *regionTop = [[NSMenuItem alloc] initWithTitle:SNCT("menu_region")
@@ -923,18 +923,12 @@ void snc_window_build_app_menu(void) {
     });
 }
 
-void snc_window_sync_app_menu(int doh, int quic, int wildcat, const char *region, int updateReady, int quicLocked) {
+void snc_window_sync_app_menu(int doh, int quic, const char *region, int updateReady) {
     dispatch_async(dispatch_get_main_queue(), ^{
         @autoreleasepool {
             if (!sncMenuDoH) return; // not built yet
-            sncMenuDoH.state     = doh     ? NSControlStateValueOn : NSControlStateValueOff;
-            sncMenuQUIC.state    = quic    ? NSControlStateValueOn : NSControlStateValueOff;
-            sncMenuWildcat.state = wildcat ? NSControlStateValueOn : NSControlStateValueOff;
-            // WildCat forces QUIC blocked for the session -- grey the item
-            // instead of hiding it (NSMenu has no per-item hide short of
-            // rebuilding the menu); the checkbox's own state above is left
-            // untouched so it reads correctly again once unlocked.
-            [sncMenuQUIC setEnabled:quicLocked ? NO : YES];
+            sncMenuDoH.state  = doh  ? NSControlStateValueOn : NSControlStateValueOff;
+            sncMenuQUIC.state = quic ? NSControlStateValueOn : NSControlStateValueOff;
             [sncMenuUpdate setEnabled:updateReady ? YES : NO];
 
             NSString *code = region ? [NSString stringWithUTF8String:region] : @"";

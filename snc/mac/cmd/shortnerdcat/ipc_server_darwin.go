@@ -25,10 +25,6 @@ type ipcServer struct {
 	doh    bool
 	region string
 
-	// WildCat state â€” updated by "wildcat" and "wildcat_token" commands from the tray.
-	wildcatEnabled bool
-	wildcatToken   string
-
 	// cmdCh receives commands from the tray process (connect, disconnect, key, â€¦)
 	cmdCh chan snmac.IPCCmd
 
@@ -94,28 +90,6 @@ func (s *ipcServer) readLoop(conn *snmac.IPCConn) {
 			case s.cmdCh <- cmd:
 			default:
 			}
-		case "wildcat":
-			// Tray toggled WildCat mode. When enabling, WildcatToken is non-empty.
-			s.mu.Lock()
-			s.wildcatEnabled = cmd.WildcatEnabled
-			if cmd.WildcatToken != "" {
-				s.wildcatToken = cmd.WildcatToken
-			}
-			s.mu.Unlock()
-			core.Log.Printf("ipc: wildcat enabled=%v token_len=%d", cmd.WildcatEnabled, len(cmd.WildcatToken))
-			// Forward to cmdCh so the main loop can trigger reconnect.
-			select {
-			case s.cmdCh <- cmd:
-			default:
-			}
-		case "wildcat_token":
-			// Tray pushed a refreshed WildCat access token.
-			s.mu.Lock()
-			if cmd.WildcatToken != "" {
-				s.wildcatToken = cmd.WildcatToken
-			}
-			s.mu.Unlock()
-			core.Log.Printf("ipc: wildcat_token refreshed len=%d", len(cmd.WildcatToken))
 		case "reconnect":
 			select {
 			case s.reconnectCh <- struct{}{}:
@@ -152,15 +126,14 @@ func (s *ipcServer) SendInit(version, logDir string, initialLogin, autoConnect, 
 		return
 	}
 	conn.SendMsg(snmac.IPCMsg{ //nolint:errcheck
-		T:              "init",
-		Version:        version,
-		LogDir:         logDir,
-		InitLogin:      initialLogin,
-		AutoConnect:    autoConnect,
-		DOH:            doh,
-		BlockQUIC:      blockQUIC,
-		Region:         region,
-		WildcatEnabled: s.wildcatEnabled,
+		T:           "init",
+		Version:     version,
+		LogDir:      logDir,
+		InitLogin:   initialLogin,
+		AutoConnect: autoConnect,
+		DOH:         doh,
+		BlockQUIC:   blockQUIC,
+		Region:      region,
 	})
 }
 
@@ -317,31 +290,4 @@ func (s *ipcServer) Region() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.region
-}
-
-// IsWildcatEnabled reports whether the tray has enabled WildCat mode.
-func (s *ipcServer) IsWildcatEnabled() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.wildcatEnabled
-}
-
-// WildcatToken returns the most recently received WildCat access token.
-// Returns "" if no token has been received (WildCat not logged in).
-func (s *ipcServer) WildcatToken() string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.wildcatToken
-}
-
-// PushWildcatStatus tells the tray whether the WildCat connect succeeded.
-// The tray uses this to uncheck the WildCat menu item on failure.
-func (s *ipcServer) PushWildcatStatus(ok bool) {
-	s.mu.Lock()
-	conn := s.conn
-	s.mu.Unlock()
-	if conn == nil {
-		return
-	}
-	conn.SendMsg(snmac.IPCMsg{T: "wildcat_status", WildcatOK: ok}) //nolint:errcheck
 }

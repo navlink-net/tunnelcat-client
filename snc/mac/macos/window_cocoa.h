@@ -89,4 +89,4 @@ void snc_window_build_app_menu(void);
 // snc_window_sync_app_menu updates menu-item checkmarks and the Update item's
 // enabled state to match the current settings. Safe to call from any thread —
 // dispatches to the main queue internally.
-void snc_window_sync_app_menu(int doh, int quic, int wildcat, const char *region, int updateReady, int quicLocked);
+void snc_window_sync_app_menu(int doh, int quic, const char *region, int updateReady);

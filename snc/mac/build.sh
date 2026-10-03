@@ -100,7 +100,7 @@ BG_IMG="$ICON_SRC/bg.png"
 
 echo "Copying tray icon assets..."
 mkdir -p "$ASSETS_DST"
-for f in snc_idle.png snc_connecting.png snc_connected.png snc_error.png snc_vless.png snc_wildcat.png bg.png logo.png; do
+for f in snc_idle.png snc_connecting.png snc_connected.png snc_error.png snc_vless.png bg.png logo.png; do
     cp "$ICON_SRC/$f" "$ASSETS_DST/$f"
 done
 

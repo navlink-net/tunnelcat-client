@@ -1812,9 +1812,7 @@ func main() {
 						}
 						return dialerPool.Pick()
 					},
-					func() bool {
-						return ipc.IsWildcatEnabled()
-					},
+					nil,
 				)
 			}
 		})
@@ -2102,11 +2100,7 @@ func main() {
 
 		// Start SOCKS5 server: spread connections across all qualifying controls via pool.
 		capturedBypassMgr := bypassMgr
-		socks5BypassMgr := capturedBypassMgr
-		if ipc.IsWildcatEnabled() {
-			socks5BypassMgr = nil // bypass disabled in WildCat mode: all traffic must use TURN
-		}
-		socks5 = core.NewSOCKS5ServerWithPool("", dialerPool, socks5BypassMgr)
+		socks5 = core.NewSOCKS5ServerWithPool("", dialerPool, capturedBypassMgr)
 		// Use the user's explicit toggle; fall back to CC-based default if no choice saved yet.
 		if settings.BlockQUIC != nil {
 			socks5.BlockQUIC = *settings.BlockQUIC
@@ -2127,10 +2121,8 @@ func main() {
 		// (snc/core/udp_assoc.go). Best-effort -- normal pool-based UDP relay
 		// (today's behavior) is exactly what happens if this fails, nothing
 		// blocks on it.
-		if !ipc.IsWildcatEnabled() {
-			socks5.RealtimeUDPDialer = core.NewQUICRelayDialer(strings.TrimPrefix(effectiveURL, "https://"), dialer.Auth())
-			core.Log.Printf("connect: realtime UDP trial dialer ready via %s", effectiveURL)
-		}
+		socks5.RealtimeUDPDialer = core.NewQUICRelayDialer(strings.TrimPrefix(effectiveURL, "https://"), dialer.Auth())
+		core.Log.Printf("connect: realtime UDP trial dialer ready via %s", effectiveURL)
 		go socks5.Serve(socksLn) //nolint:errcheck
 
 		// Pool management: RTT-based promotion + drain completion.
@@ -2252,9 +2244,7 @@ func main() {
 				}
 				return dialerPool.Pick()
 			},
-			func() bool {
-				return ipc.IsWildcatEnabled()
-			},
+			nil,
 		)
 		// Push this account's real log-upload preference to the tray/window
 		// once the tunnel exists to ask the arbiter over -- see
@@ -2294,9 +2284,7 @@ func main() {
 				}
 				return dialerPool.Pick()
 			},
-			func() bool {
-				return ipc.IsWildcatEnabled()
-			},
+			nil,
 		)
 
 		// Country checker: propagate bypass CIDR result to router and recheck every 5 min.
@@ -2374,12 +2362,6 @@ func main() {
 
 		core.Log.Printf("connected: srvURL=%s region=%q", serverURL, settings.PreferredRegion)
 		connStatsCollector.IncConnect(!autoReconnect)
-		// WildCat mode is decided once, at connect time -- not something that
-		// flips mid-session, so it's safe to check it here to start the
-		// session-duration clock. onDisconnect below closes it out.
-		if ipc.IsWildcatEnabled() {
-			connStatsCollector.StartWildcatSession()
-		}
 
 		// Start the once-a-second uplink/downlink counter push to the tray
 		// (core.TotalBytes() only exists meaningfully here in the daemon --
@@ -2420,7 +2402,6 @@ func main() {
 		}
 		ipc.PushBytes(0, 0)
 
-		// No-op if no WildCat session is active (regular connect).
 		connStatsCollector.IncDisconnect(!autoReconnect)
 		if autoReconnect {
 			core.Log.Println("disconnecting... (auto-reconnect)")
@@ -2459,7 +2440,6 @@ func main() {
 			decoyMgr = nil
 		}
 		if socks5 != nil {
-			socks5.WildcatDNS = false
 			socks5.Close() //nolint:errcheck
 			socks5 = nil
 		}
@@ -2670,25 +2650,6 @@ func main() {
 				core.Log.Printf("ipc: settings blockQUIC=%v region=%q doh=%v", cmd.BlockQUIC, cmd.Region, cmd.DOH)
 				onBlockQUICChange(cmd.BlockQUIC)
 				onRegionChange(cmd.Region)
-
-			case "wildcat":
-				// Tray toggled WildCat mode. Trigger a full reconnect so onConnect
-				// picks up the change on the new call.
-				core.Log.Printf("ipc: wildcat toggled enabled=%v", cmd.WildcatEnabled)
-				go func(enable bool) {
-					onDisconnect(true)
-					if enable {
-						ipc.PushStatus("pending", "")
-						if err := onConnect(true); err != nil {
-							core.Log.Printf("wildcat: connect: %v", err)
-							ipc.PushStatus("error", err.Error())
-						} else {
-							ipc.PushStatus("connected", "")
-						}
-					} else {
-						ipc.PushStatus("idle", "")
-					}
-				}(cmd.WildcatEnabled)
 
 			case "quit":
 				core.Log.Printf("ipc: quit received from tray")

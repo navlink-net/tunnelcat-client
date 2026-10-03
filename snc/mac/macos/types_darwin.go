@@ -14,15 +14,12 @@ type AppStatus struct {
 	LoggedIn      bool   `json:"loggedIn"`
 	Error         bool   `json:"error"`    // last connect/login attempt failed (see TrayApp.setTrayIcon)
 	ErrorMsg      string `json:"errorMsg"` // human-readable reason, e.g. "Connect failed: dial tcp ...: timeout"
-	Mode          string `json:"mode"`     // "direct"
 	Elapsed       string `json:"elapsed"`  // "HH:MM:SS" while connected
 }
 
 // AppSettings mirrors the persistent user settings shown in the Settings tab.
 type AppSettings struct {
-	DoH        bool   `json:"doh"`
-	BlockQUIC  bool   `json:"blockQUIC"`
-	Region     string `json:"region"` // "" = Auto; "RU"/"EU"/"US"/"CN"/"XX"
-	Wildcat    bool   `json:"wildcat"`
-	QUICLocked bool   `json:"quicLocked"` // WildCat is forcing QUIC blocked -- see TrayApp.IsWildcatQUICLocked
+	DoH       bool   `json:"doh"`
+	BlockQUIC bool   `json:"blockQUIC"`
+	Region    string `json:"region"` // "" = Auto; "RU"/"EU"/"US"/"CN"/"XX"
 }
