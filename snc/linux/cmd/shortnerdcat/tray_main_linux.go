@@ -86,21 +86,16 @@ func runTrayProcess(socketPath string, watchdogRestart bool) {
 		sendCmd(snmac.IPCCmd{T: "settings", Region: r, DOH: trayApp.IsDNSOverHTTPSEnabled()})
 	}
 
-	onWildcatChange := func(enabled bool) {
-		sendCmd(snmac.IPCCmd{T: "wildcat", WildcatEnabled: enabled})
-	}
-
 	trayApp = snlin.NewTrayApp(
 		initMsg.Version,
 		initMsg.InitLogin,
 		initMsg.AutoConnect,
 		initMsg.DOH,
 		initMsg.BlockQUIC,
-		initMsg.WildcatEnabled,
 		initMsg.Region,
 		onLogin, onLogout, onConnect, onDisconnect,
 		nil, // onDNSOverHTTPSChange â€” sent via settings cmd
-		onBlockQUICChange, onWildcatChange, onRegionChange,
+		onBlockQUICChange, onRegionChange,
 	)
 
 	trayApp.SetShareLogsCallback(func() {
@@ -115,10 +110,6 @@ func runTrayProcess(socketPath string, watchdogRestart bool) {
 		OnConnect:    func() { sendCmd(snmac.IPCCmd{T: "connect"}) },
 		OnDisconnect: func() { sendCmd(snmac.IPCCmd{T: "disconnect"}) },
 		OnSettings: func(s snlin.AppSettings) {
-			if s.WildCat != trayApp.IsWildcatEnabled() {
-				onWildcatChange(s.WildCat)
-			}
-			// All other settings go through the "settings" IPC command.
 			sendCmd(snmac.IPCCmd{
 				T:         "settings",
 				DOH:       s.DoH,
@@ -237,12 +228,6 @@ func runTrayProcess(socketPath string, watchdogRestart bool) {
 			case "reconnect":
 				core.Log.Printf("tray: received reconnect from daemon")
 				trayApp.TriggerReconnect()
-
-			case "wildcat_status":
-				if !msg.WildcatOK {
-					core.Log.Printf("tray: WildCat connect failed â€” reverting checkbox")
-					trayApp.SetWildcatChecked(false)
-				}
 
 			case "club_theme":
 				if appWin != nil {

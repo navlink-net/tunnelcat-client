@@ -72,7 +72,6 @@ type TrayApp struct {
 
 	dohEnabled       bool
 	blockQUICEnabled bool
-	wildcatEnabled   bool
 	preferredRegion  string
 
 	onLogin              func() error
@@ -81,7 +80,6 @@ type TrayApp struct {
 	onDisconnect         func(autoReconnect bool)
 	onDNSOverHTTPSChange func(bool)
 	onBlockQUICChange    func(bool)
-	onWildcatChange      func(bool)
 	onRegionChange       func(string)
 	onStatusChange       func()
 	onBeforeQuit         func()
@@ -94,7 +92,7 @@ type TrayApp struct {
 	mDisconnect    *systray.MenuItem
 	mDNSOverHTTPS  *systray.MenuItem
 	mBlockQUIC     *systray.MenuItem
-	mWildcat       *systray.MenuItem
+	mWildcat       *systray.MenuItem // WildCat info-panel item
 	mRegion        *systray.MenuItem
 	mRegionAuto    *systray.MenuItem
 	mRegionRussia  *systray.MenuItem
@@ -118,7 +116,6 @@ func NewTrayApp(
 	autoConnect bool,
 	dohEnabled bool,
 	blockQUICEnabled bool,
-	wildcatEnabled bool,
 	preferredRegion string,
 	onLogin func() error,
 	onLogout func(),
@@ -126,7 +123,6 @@ func NewTrayApp(
 	onDisconnect func(autoReconnect bool),
 	onDNSOverHTTPSChange func(bool),
 	onBlockQUICChange func(bool),
-	onWildcatChange func(bool),
 	onRegionChange func(string),
 ) *TrayApp {
 	return &TrayApp{
@@ -135,7 +131,6 @@ func NewTrayApp(
 		autoConnect:          autoConnect,
 		dohEnabled:           dohEnabled,
 		blockQUICEnabled:     blockQUICEnabled,
-		wildcatEnabled:       wildcatEnabled,
 		preferredRegion:      preferredRegion,
 		onLogin:              onLogin,
 		onLogout:             onLogout,
@@ -143,7 +138,6 @@ func NewTrayApp(
 		onDisconnect:         onDisconnect,
 		onDNSOverHTTPSChange: onDNSOverHTTPSChange,
 		onBlockQUICChange:    onBlockQUICChange,
-		onWildcatChange:      onWildcatChange,
 		onRegionChange:       onRegionChange,
 		reconnectCh:          make(chan struct{}, 1),
 		connectCh:            make(chan struct{}, 1),
@@ -176,64 +170,6 @@ func (a *TrayApp) IsBlockQUICEnabled() bool {
 	return a.mBlockQUIC.Checked()
 }
 
-// IsWildcatEnabled reports whether WildCat mode is currently enabled.
-func (a *TrayApp) IsWildcatEnabled() bool {
-	if a.mWildcat == nil {
-		return a.wildcatEnabled
-	}
-	return a.mWildcat.Checked()
-}
-
-// SetWildcatChecked forces the WildCat checkbox to checked/unchecked without
-// triggering the callback (used to revert on a failed connect attempt).
-func (a *TrayApp) SetWildcatChecked(v bool) {
-	a.mu.Lock()
-	a.wildcatEnabled = v
-	a.mu.Unlock()
-	if a.mWildcat == nil {
-		return
-	}
-	if v {
-		a.mWildcat.Check()
-	} else {
-		a.mWildcat.Uncheck()
-	}
-	a.refreshBlockQUICVisibility()
-}
-
-// IsWildcatQUICLocked reports whether WildCat mode is currently forcing QUIC
-// blocked, for the active/pending session. True only while a WildCat
-// connection is actually connecting or connected -- unblocked UDP:443 QUIC
-// could leak traffic straight past the WildCat relay. The underlying
-// Disable QUIC preference is never touched by this -- callers hide the
-// checkbox instead, so un-hiding it later shows exactly the state it was in
-// before WildCat took over.
-func (a *TrayApp) IsWildcatQUICLocked() bool {
-	a.mu.Lock()
-	active := a.connected || a.connecting
-	a.mu.Unlock()
-	return active && a.IsWildcatEnabled()
-}
-
-// refreshBlockQUICVisibility hides the "Disable QUIC" checkbox while
-// IsWildcatQUICLocked, and shows it again otherwise.
-func (a *TrayApp) refreshBlockQUICVisibility() {
-	if a.mBlockQUIC == nil {
-		return
-	}
-	a.mu.Lock()
-	loggedIn := a.loggedIn
-	a.mu.Unlock()
-	if !loggedIn {
-		return // login/logout flow already hides/shows it directly
-	}
-	if a.IsWildcatQUICLocked() {
-		a.mBlockQUIC.Hide()
-	} else {
-		a.mBlockQUIC.Show()
-	}
-}
-
 // setTrayIcon sets the tray icon and records errMsg as the current error
 // reason ("" for any non-error icon), mirroring the Windows implementation
 // so the main window status bar can show the actual failure text.
@@ -245,9 +181,6 @@ func (a *TrayApp) setTrayIcon(icon []byte, errMsg string) {
 }
 
 func (a *TrayApp) connectedIcon() []byte {
-	if a.IsWildcatEnabled() {
-		return readAsset("snc_wildcat.png")
-	}
 	return readAsset("snc_connected.png")
 }
 
@@ -305,7 +238,6 @@ func (a *TrayApp) callStatusChange() {
 	a.mu.Lock()
 	fn := a.onStatusChange
 	a.mu.Unlock()
-	a.refreshBlockQUICVisibility()
 	if fn != nil {
 		go fn()
 	}
@@ -321,7 +253,7 @@ func (a *TrayApp) GetAppStatus() AppStatus {
 	errMsg := a.errorMsg
 	a.mu.Unlock()
 
-	s := AppStatus{
+	return AppStatus{
 		Connected:     connected,
 		Connecting:    connecting,
 		Disconnecting: disconnecting,
@@ -329,20 +261,14 @@ func (a *TrayApp) GetAppStatus() AppStatus {
 		Error:         errMsg != "",
 		ErrorMsg:      errMsg,
 	}
-	if connected {
-		s.Mode = "direct"
-	}
-	return s
 }
 
 // GetAppSettings returns the current settings.
 func (a *TrayApp) GetAppSettings() AppSettings {
 	return AppSettings{
-		DoH:        a.IsDNSOverHTTPSEnabled(),
-		BlockQUIC:  a.IsBlockQUICEnabled(),
-		Region:     a.PreferredRegion(),
-		WildCat:    a.IsWildcatEnabled(),
-		QUICLocked: a.IsWildcatQUICLocked(),
+		DoH:       a.IsDNSOverHTTPSEnabled(),
+		BlockQUIC: a.IsBlockQUICEnabled(),
+		Region:    a.PreferredRegion(),
 	}
 }
 
@@ -584,7 +510,7 @@ func (a *TrayApp) onReady() {
 	systray.AddSeparator()
 	a.mDNSOverHTTPS = systray.AddMenuItemCheckbox(T("menu_doh_title"), T("menu_doh_tooltip"), a.dohEnabled)
 	a.mBlockQUIC = systray.AddMenuItemCheckbox(T("menu_block_quic_title"), T("menu_block_quic_tooltip"), a.blockQUICEnabled)
-	a.mWildcat = systray.AddMenuItemCheckbox(T("menu_wildcat_title"), T("menu_wildcat_tooltip"), a.wildcatEnabled)
+	a.mWildcat = systray.AddMenuItem(T("menu_wildcat_title"), T("menu_wildcat_tooltip"))
 	a.mRegion = systray.AddMenuItem(T("menu_region_prefix")+regionName(a.preferredRegion), T("menu_region_tooltip"))
 	a.mRegionAuto = a.mRegion.AddSubMenuItemCheckbox(T("region_auto"), T("region_auto_tooltip"), a.preferredRegion == "")
 	a.mRegionRussia = a.mRegion.AddSubMenuItemCheckbox(T("region_russia"), T("region_russia"), a.preferredRegion == "RU")
@@ -681,17 +607,7 @@ func (a *TrayApp) onReady() {
 				}
 
 			case <-a.mWildcat.ClickedCh:
-				core.Log.Printf("tray: user toggled WildCat (was checked=%v)", a.mWildcat.Checked())
-				if a.mWildcat.Checked() {
-					a.mWildcat.Uncheck()
-				} else {
-					a.mWildcat.Check()
-				}
-				core.Log.Printf("tray: WildCat now=%v", a.mWildcat.Checked())
-				a.refreshBlockQUICVisibility()
-				if a.onWildcatChange != nil {
-					a.onWildcatChange(a.mWildcat.Checked())
-				}
+				go ShowWildcatInfo()
 
 			case <-a.mRegionAuto.ClickedCh:
 				a.setRegion("", a.mRegionAuto)

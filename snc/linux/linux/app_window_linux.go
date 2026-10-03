@@ -341,16 +341,16 @@ func buildAppWindowHTML() string {
 	// them independent.
 	for _, name := range []string{
 		"illustration_idle.png", "illustration_connecting.png", "illustration_connected.png",
-		"illustration_wildcat.png", "illustration_error.png",
+		"illustration_error.png",
 		// Club-theme variants (see tunnel_cat/docs/club-membership.md) --
-		// same five states, palette-only variants. Their sncasset:// tokens
+		// same four states, palette-only variants. Their sncasset:// tokens
 		// appear in the JS catAssets map below, not as <img> src literals,
 		// so this ReplaceAll pass is the only place they get baked in.
 		"illustration_idle_catclub.png", "illustration_connecting_catclub.png",
-		"illustration_connected_catclub.png", "illustration_wildcat_catclub.png",
+		"illustration_connected_catclub.png",
 		"illustration_error_catclub.png",
 		"illustration_idle_elite.png", "illustration_connecting_elite.png",
-		"illustration_connected_elite.png", "illustration_wildcat_elite.png",
+		"illustration_connected_elite.png",
 		"illustration_error_elite.png",
 	} {
 		data := readAsset(name)
@@ -479,7 +479,6 @@ body{
 #status-bar.state-disconnected{background:#5b6470}
 #status-bar.state-connecting{background:#e08a2e}
 #status-bar.state-error{background:#c0392b}
-#status-bar.state-wildcat{background:#000}
 /* â”€â”€ Live uplink/downlink byte counter â”€â”€ sits bottom-right, just above the
    status bar (never overlapping its centered text). Hidden by default;
    window.onStatusUpdate toggles it on/off with the connected state, and
@@ -655,10 +654,6 @@ body{
       <div class="settings-section">
         <h3>{{T:connection_options}}</h3>
         <div class="srow">
-          <div class="srow-label">{{T:wildcat_label}}</div>
-          <input type="checkbox" id="s-wildcat" onchange="saveSettings()">
-        </div>
-        <div class="srow">
           <div class="srow-label">{{T:doh_label}}</div>
           <input type="checkbox" id="s-doh" onchange="saveSettings()">
         </div>
@@ -711,7 +706,6 @@ const I18N = {
   connecting: "{{T:js_connecting}}",
   disconnecting: "{{T:js_disconnecting}}",
   connected: "{{T:js_connected}}",
-  connectedWildcat: "{{T:js_connected_wildcat}}",
   disconnected: "{{T:js_disconnected}}",
   errorDefault: "{{T:js_error_default}}",
   recommendSentPrefix: "{{T:js_recommend_sent_prefix}}",
@@ -831,7 +825,6 @@ window.onCredentialError = function(msg) {
 };
 function saveSettings() {
   window.webkit.messageHandlers.sncSetSettings.postMessage({
-    wildcat:   document.getElementById('s-wildcat').checked,
     doh:       document.getElementById('s-doh').checked,
     blockQUIC: document.getElementById('s-block-quic').checked,
     region:    document.getElementById('s-region').value,
@@ -847,17 +840,14 @@ window.catAssets = {
   idle: 'sncasset://illustration_idle.png',
   connecting: 'sncasset://illustration_connecting.png',
   connected: 'sncasset://illustration_connected.png',
-  wildcat: 'sncasset://illustration_wildcat.png',
   error: 'sncasset://illustration_error.png',
   idle_catclub: 'sncasset://illustration_idle_catclub.png',
   connecting_catclub: 'sncasset://illustration_connecting_catclub.png',
   connected_catclub: 'sncasset://illustration_connected_catclub.png',
-  wildcat_catclub: 'sncasset://illustration_wildcat_catclub.png',
   error_catclub: 'sncasset://illustration_error_catclub.png',
   idle_elite: 'sncasset://illustration_idle_elite.png',
   connecting_elite: 'sncasset://illustration_connecting_elite.png',
   connected_elite: 'sncasset://illustration_connected_elite.png',
-  wildcat_elite: 'sncasset://illustration_wildcat_elite.png',
   error_elite: 'sncasset://illustration_error_elite.png',
 };
 window.clubTheme = '';
@@ -967,11 +957,10 @@ window.onStatusUpdate = function(s) {
     img.src=catAssetURL('connecting');return;
   }
   if(s.connected){
-    var wc=s.mode==='wildcat';
-    bar.classList.add(wc?'state-wildcat':'state-connected');
-    bar.textContent=wc?I18N.connectedWildcat:I18N.connected;
+    bar.classList.add('state-connected');
+    bar.textContent=I18N.connected;
     bcon.style.display='none';bdis.style.display='';
-    img.src=catAssetURL(wc?'wildcat':'connected');return;
+    img.src=catAssetURL('connected');return;
   }
   bar.classList.add('state-disconnected');bar.textContent=I18N.disconnected;
   bcon.style.display='';bdis.style.display='none';
@@ -984,14 +973,9 @@ window.onLoginError = function(msg) {
   document.getElementById('btn-activate').disabled = false;
 };
 window.onSettingsUpdate = function(s) {
-  document.getElementById('s-wildcat').checked    = !!s.wildcat;
   document.getElementById('s-doh').checked        = !!s.doh;
   document.getElementById('s-block-quic').checked = !!s.blockQUIC;
   document.getElementById('s-region').value       = s.region||'';
-  // WildCat forces QUIC blocked for the session -- hide the row entirely
-  // rather than just greying it (checkbox state above is left untouched,
-  // so it reads correctly again the moment WildCat releases the lock).
-  document.getElementById('s-block-quic-row').style.display = s.quicLocked ? 'none' : '';
 };
 
 // Log-upload preference lives on the account server-side (see

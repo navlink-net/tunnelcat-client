@@ -850,20 +850,6 @@ func main() {
 		decoyMgr          *core.DecoyManager
 	)
 
-	// wildcatEnabled and wildcatToken are set via "wildcat" IPC command from the tray.
-	// Accessed only from the main IPC loop goroutine and onConnect/onDisconnect
-	// goroutines started by it â€” not concurrently.
-	var (
-		wildcatEnabled = settings.WildcatEnabled
-		wildcatToken   string
-	)
-	// wildcatEnabledAtomic mirrors wildcatEnabled for logUploader's background
-	// ticker goroutine, which is genuinely concurrent with the IPC loop (unlike
-	// the two goroutines the comment above scopes plain wildcatEnabled to) --
-	// see logUploader.Start's wildcatActive param below.
-	var wildcatEnabledAtomic atomic.Bool
-	wildcatEnabledAtomic.Store(settings.WildcatEnabled)
-
 	// Network monitor: detect gateway change (sleep/wake, WiFi handoff).
 	netMon := snlin.NewNetworkMonitor(func() {
 		core.Log.Printf("netmon: gateway changed â€” triggering reconnect")
@@ -1893,9 +1879,7 @@ func main() {
 				}
 				return dialerPool.Pick()
 			},
-			func() bool {
-				return wildcatEnabledAtomic.Load()
-			},
+			nil,
 		)
 		// Push this account's real log-upload preference to the tray/window
 		// once the tunnel exists to ask the arbiter over -- see
@@ -1935,9 +1919,7 @@ func main() {
 				}
 				return dialerPool.Pick()
 			},
-			func() bool {
-				return wildcatEnabledAtomic.Load()
-			},
+			nil,
 		)
 
 		stop := make(chan struct{})
@@ -2013,9 +1995,6 @@ func main() {
 		torrentUpdater = updater
 
 		core.Log.Printf("connected: srvURL=%s region=%q", serverURL, settings.PreferredRegion)
-		// This is the non-WildCat connect path -- the WildCat branch further up
-		// this function returns before ever reaching here (see its own
-		// IncConnect/StartWildcatSession calls).
 		connStatsCollector.IncConnect(!autoReconnect)
 		return nil
 	}
@@ -2138,7 +2117,6 @@ func main() {
 					ipc.SendInit(core.Version, logDir,
 						initialLogin, autoConnect,
 						settings.DOHEnabled, initBlockQUIC,
-						settings.WildcatEnabled,
 						settings.PreferredRegion)
 				} else if prev != nil && ipcSession != nil {
 					sess, sock := ipcSession, ipcSocket
@@ -2258,17 +2236,6 @@ func main() {
 					cmd.BlockQUIC, cmd.Region, cmd.DOH)
 				onBlockQUICChange(cmd.BlockQUIC)
 				onRegionChange(cmd.Region)
-
-			case "wildcat":
-				core.Log.Printf("ipc: wildcat enabled=%v tokenLen=%d", cmd.WildcatEnabled, len(cmd.WildcatToken))
-				wildcatEnabled = cmd.WildcatEnabled
-				wildcatEnabledAtomic.Store(cmd.WildcatEnabled)
-				if cmd.WildcatToken != "" {
-					wildcatToken = cmd.WildcatToken
-				}
-				settings.WildcatEnabled = cmd.WildcatEnabled
-				saveClientSettings(adir, settings)
-				// WildCat switches the underlying transport â€” reconnect to apply.
 
 			case "quit":
 				// Tray user clicked Quit. Write clean-shutdown flag so the
@@ -2451,7 +2418,6 @@ type clientSettings struct {
 	DOHEnabled      bool   `json:"doh_enabled"`
 	BlockQUIC       *bool  `json:"block_quic,omitempty"`
 	PreferredRegion string `json:"preferred_region,omitempty"`
-	WildcatEnabled  bool   `json:"wildcat_enabled,omitempty"`
 }
 
 func loadClientSettings(dir string) clientSettings {

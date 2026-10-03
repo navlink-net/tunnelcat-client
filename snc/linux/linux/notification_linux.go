@@ -67,27 +67,51 @@ func ShowKeyDialog() (string, error) {
 	return "", nil
 }
 
-// ShowWildcatWarning shows a blocking, single-button (OK) informational
-// dialog explaining what WildCat mode does, mirroring the equivalent warning
-// shown on other platforms before WildCat is enabled. Same two-binary
-// fallback shape as ShowKeyDialog (zenity, then kdialog). Best-effort: if
-// neither binary is available, this silently does nothing rather than
-// blocking WildCat activation on a dialog helper being installed.
-func ShowWildcatWarning() {
-	title := T("wildcat_warning_title")
-	text := T("wildcat_warning_text")
-	if err := exec.Command("zenity", "--warning",
-		"--title="+title,
-		"--text="+text,
-		"--ok-label=OK",
-	).Run(); err == nil {
+// ShowWildcatInfo shows a blocking, two-button informational dialog
+// explaining that whitelist-bypass mode is now a separate app, WildCat --
+// mirrors the equivalent info panel on other platforms, shown every time
+// the tray's WildCat menu item is clicked (no state, no toggle). "Download"
+// opens the WildCat app's page; "Close" dismisses. Same two-binary fallback
+// shape as ShowKeyDialog (zenity, then kdialog). Best-effort: if neither
+// binary is available, this silently does nothing.
+//
+// runWildcatInfoDialog distinguishes "the binary ran and the user answered"
+// (ran=true) from "the binary isn't installed / failed to start" (ran=false)
+// via the error type -- exec.Command.Run() returns *exec.ExitError for a
+// real nonzero exit (e.g. the user clicked Close) and a different error type
+// when the binary itself can't be found.
+func runWildcatInfoDialog(name string, args ...string) (ok, ran bool) {
+	err := exec.Command(name, args...).Run()
+	if err == nil {
+		return true, true
+	}
+	if _, isExitErr := err.(*exec.ExitError); isExitErr {
+		return false, true
+	}
+	return false, false
+}
+
+func ShowWildcatInfo() {
+	title := T("wildcat_info_title")
+	text := T("wildcat_info_message")
+	downloadLabel := T("wildcat_info_download")
+	closeLabel := T("wildcat_info_close")
+
+	if ok, ran := runWildcatInfoDialog("zenity", "--question",
+		"--title="+title, "--text="+text,
+		"--ok-label="+downloadLabel, "--cancel-label="+closeLabel); ran {
+		if ok {
+			exec.Command("xdg-open", "https://apps.navlink.net").Run() //nolint:errcheck
+		}
 		return
 	}
-	if err := exec.Command("kdialog",
-		"--title", title,
-		"--msgbox", text,
-	).Run(); err == nil {
+	if ok, ran := runWildcatInfoDialog("kdialog",
+		"--title", title, "--yesno", text,
+		"--yes-label", downloadLabel, "--no-label", closeLabel); ran {
+		if ok {
+			exec.Command("xdg-open", "https://apps.navlink.net").Run() //nolint:errcheck
+		}
 		return
 	}
-	core.Log.Printf("wildcat warning: neither zenity nor kdialog available")
+	core.Log.Printf("wildcat info: neither zenity nor kdialog available")
 }
