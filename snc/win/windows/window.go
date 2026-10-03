@@ -57,11 +57,9 @@ type AppStatus struct {
 	Connected     bool   `json:"connected"`
 	Connecting    bool   `json:"connecting"`
 	Disconnecting bool   `json:"disconnecting"`
-	Error         bool   `json:"error"`      // last connect/login attempt failed (see TrayApp.setTrayIcon)
-	ErrorMsg      string `json:"errorMsg"`   // human-readable reason, e.g. "Connect failed: dial tcp ...: timeout"
-	Mode          string `json:"mode"`       // "direct"
-	Elapsed       string `json:"elapsed"`    // "01:23:45" or ""
-	QUICLocked    bool   `json:"quicLocked"` // WildCat is forcing QUIC blocked -- see TrayApp.IsWildcatQUICLocked
+	Error         bool   `json:"error"`    // last connect/login attempt failed (see TrayApp.setTrayIcon)
+	ErrorMsg      string `json:"errorMsg"` // human-readable reason, e.g. "Connect failed: dial tcp ...: timeout"
+	Elapsed       string `json:"elapsed"`  // "01:23:45" or ""
 }
 
 // AppSettings mirrors the persistent settings.
@@ -69,7 +67,6 @@ type AppSettings struct {
 	DoH       bool   `json:"doh"`
 	BlockQUIC bool   `json:"blockQUIC"`
 	Region    string `json:"region"` // "" = Auto; "RU"/"EU"/"US"/"CN"/"XX"
-	WildCat   bool   `json:"wildcat"`
 }
 
 // formatByteCount renders a cumulative byte count as a short human-readable

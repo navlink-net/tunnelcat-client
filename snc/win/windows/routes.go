@@ -43,11 +43,11 @@ func hiddenCmd(name string, args ...string) *exec.Cmd {
 //     128.0.0.0/1 together cover every address and out-metric the original
 //     0.0.0.0/0 default route).
 //   - DNS (port 53) is captured by TUN like everything else and handled by
-//     snc/core/udp_assoc.go's own per-mode logic, which already tunnels it
-//     by default and only goes direct in WildCat mode (see that file's
-//     forwardOutbound). No OS-level route exclusion for the DNS server IP
-//     exists here on purpose: an earlier "DNS bypass" route (removed
-//     2026-08-12, see the incident where a user's Google/YouTube/WhatsApp
+//     snc/core/udp_assoc.go's own per-mode logic, which tunnels it by
+//     default (see that file's forwardOutbound). No OS-level route
+//     exclusion for the DNS server IP exists here on purpose: an earlier
+//     "DNS bypass" route (removed 2026-08-12, see the incident where a
+//     user's Google/YouTube/WhatsApp
 //     broke after DoH got toggled off) pre-empted that logic entirely by
 //     sending DNS packets out the physical NIC before they ever reached TUN,
 //     leaking every query to the ISP in plain text whenever DoH wasn't

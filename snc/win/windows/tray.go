@@ -81,7 +81,7 @@ type TrayApp struct {
 	onStatusChange func() // called on every status transition; may be nil
 
 	// onSettingsChange is called whenever a settings toggle (DoH, BlockQUIC,
-	// WildCat, region) is changed FROM the tray's own context menu. The
+	// region) is changed FROM the tray's own context menu. The
 	// window's Settings tab and native menu bar only ever learn about a
 	// settings change through the reverse direction (AppWindow.saveSettings/
 	// toggleMenuSetting -> SetSettingsFn -> ApplyWindowSettings) -- a change
@@ -193,10 +193,6 @@ type TrayApp struct {
 	mUpdate        *systray.MenuItem // shown only when a newer binary has been downloaded
 	updateNotifyCh chan string       // receives new version string when update is ready
 
-	wildcatEnabled  bool
-	mWildcat        *systray.MenuItem
-	onWildcatChange func(bool)
-
 	onOpenWindow func() // opens/shows the main application window; may be nil
 }
 
@@ -220,7 +216,6 @@ func NewTrayApp(
 	autoConnect bool,
 	dohEnabled bool,
 	blockQUICEnabled bool,
-	wildcatEnabled bool,
 	preferredRegion string,
 	onLogin func() error,
 	onLogout func(),
@@ -228,7 +223,6 @@ func NewTrayApp(
 	onDisconnect func(autoReconnect bool),
 	onDNSOverHTTPSChange func(bool),
 	onBlockQUICChange func(bool),
-	onWildcatChange func(bool),
 	onRegionChange func(string),
 ) *TrayApp {
 	return &TrayApp{
@@ -237,7 +231,6 @@ func NewTrayApp(
 		autoConnect:          autoConnect,
 		dohEnabled:           dohEnabled,
 		blockQUICEnabled:     blockQUICEnabled,
-		wildcatEnabled:       wildcatEnabled,
 		preferredRegion:      preferredRegion,
 		onLogin:              onLogin,
 		onLogout:             onLogout,
@@ -245,7 +238,6 @@ func NewTrayApp(
 		onDisconnect:         onDisconnect,
 		onDNSOverHTTPSChange: onDNSOverHTTPSChange,
 		onBlockQUICChange:    onBlockQUICChange,
-		onWildcatChange:      onWildcatChange,
 		onRegionChange:       onRegionChange,
 		reconnectCh:          make(chan struct{}, 1),
 		updateNotifyCh:       make(chan string, 1),
@@ -292,7 +284,7 @@ func (a *TrayApp) setTrayIcon(icon []byte, errMsg string) {
 
 // IsDisconnectPending reports whether a disconnect was requested while a connect
 // was already in progress. Used by the connect goroutine to abort mid-flight
-// work (e.g. the WildCat relay pool build) without waiting for the full connect to finish.
+// work without waiting for the full connect to finish.
 func (a *TrayApp) IsDisconnectPending() bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -305,50 +297,6 @@ func (a *TrayApp) IsBlockQUICEnabled() bool {
 		return a.blockQUICEnabled
 	}
 	return a.mBlockQUIC.Checked()
-}
-
-// IsWildcatEnabled reports whether the user has enabled WildCat mode.
-func (a *TrayApp) IsWildcatEnabled() bool {
-	if a.mWildcat == nil {
-		return a.wildcatEnabled
-	}
-	return a.mWildcat.Checked()
-}
-
-// IsWildcatQUICLocked reports whether WildCat mode is currently forcing QUIC
-// blocked, for the active/pending session. This is true only while a
-// WildCat connection is actually connecting or connected -- WildCat's
-// effect on the tunnel is decided once, at connect time (see doConnect),
-// so merely checking the WildCat checkbox while idle forces nothing yet.
-// The underlying Disable QUIC preference is never touched by this -- callers
-// hide/grey the checkbox instead, so un-hiding it later shows exactly the
-// state it was in before WildCat took over.
-func (a *TrayApp) IsWildcatQUICLocked() bool {
-	a.mu.Lock()
-	active := a.connected || a.connecting
-	a.mu.Unlock()
-	return active && a.IsWildcatEnabled()
-}
-
-// refreshBlockQUICVisibility hides the "Disable QUIC" checkbox while
-// IsWildcatQUICLocked, and shows it again otherwise -- see that method's
-// doc comment for why this is safe to call unconditionally on every status
-// or WildCat-setting change.
-func (a *TrayApp) refreshBlockQUICVisibility() {
-	if a.mBlockQUIC == nil {
-		return
-	}
-	a.mu.Lock()
-	loggedIn := a.loggedIn
-	a.mu.Unlock()
-	if !loggedIn {
-		return // login/logout flow already hides/shows it directly
-	}
-	if a.IsWildcatQUICLocked() {
-		a.mBlockQUIC.Hide()
-	} else {
-		a.mBlockQUIC.Show()
-	}
 }
 
 // GetPreferredRegion returns the user's current explicit region selection.
@@ -781,7 +729,7 @@ func (a *TrayApp) doConnect(autoReconnect bool) {
 	a.setTrayIcon(a.connectedIcon(), "")
 	// mDisconnect is already visible
 	//
-	// The settings items (DoH/BlockQUIC/WildCat/Region), by contrast, are
+	// The settings items (DoH/BlockQUIC/Region), by contrast, are
 	// NOT already visible here for an auto-reconnect: doDisconnect() hides
 	// all of them unconditionally at the start of every disconnect, but only
 	// re-Shows them in its own "restore idle" branch, which is explicitly
@@ -1322,9 +1270,9 @@ func (a *TrayApp) SetBytesTickCallback(fn func()) {
 }
 
 // SetSettingsChangeCallback registers a function called whenever a settings
-// toggle changes via the tray's own context menu (DoH, BlockQUIC, WildCat,
-// region) -- the one direction of sync that had no path back to the window
-// at all. See onSettingsChange's doc comment for the incident this fixes.
+// toggle changes via the tray's own context menu (DoH, BlockQUIC, region) --
+// the one direction of sync that had no path back to the window at all. See
+// onSettingsChange's doc comment for the incident this fixes.
 func (a *TrayApp) SetSettingsChangeCallback(fn func()) {
 	a.mu.Lock()
 	a.onSettingsChange = fn
@@ -1332,8 +1280,8 @@ func (a *TrayApp) SetSettingsChangeCallback(fn func()) {
 }
 
 // notifySettingsChange fires onSettingsChange in a goroutine if it is set.
-// Call after every tray-menu settings mutation (DoH/BlockQUIC/WildCat/
-// region), mirroring callStatusChange's fire-and-forget shape.
+// Call after every tray-menu settings mutation (DoH/BlockQUIC/region),
+// mirroring callStatusChange's fire-and-forget shape.
 func (a *TrayApp) notifySettingsChange() {
 	a.mu.Lock()
 	fn := a.onSettingsChange
@@ -1354,7 +1302,6 @@ func (a *TrayApp) callStatusChange() {
 	logevent.Emit(binlog.TagSystem, logevent.EventWinTrayState,
 		logevent.Str(logevent.AttrStage, "status_change"),
 		logevent.Str(logevent.AttrDetail, fmt.Sprintf("connected=%v connecting=%v disconnecting=%v fn=%v", connected, connecting, disconnecting, fn != nil)))
-	a.refreshBlockQUICVisibility()
 	if fn != nil {
 		go fn()
 	}
@@ -1370,18 +1317,13 @@ func (a *TrayApp) GetAppStatus() AppStatus {
 	at := a.connectedAt
 	a.mu.Unlock()
 
-	s := AppStatus{Connected: connected, Connecting: connecting, Disconnecting: disconnecting, Error: errorMsg != "", ErrorMsg: errorMsg, QUICLocked: a.IsWildcatQUICLocked()}
+	s := AppStatus{Connected: connected, Connecting: connecting, Disconnecting: disconnecting, Error: errorMsg != "", ErrorMsg: errorMsg}
 	if connected {
 		since := time.Since(at)
 		h := int(since.Hours())
 		m := int(since.Minutes()) % 60
 		sec := int(since.Seconds()) % 60
 		s.Elapsed = fmt.Sprintf("%02d:%02d:%02d", h, m, sec)
-		if a.IsWildcatEnabled() {
-			s.Mode = "wildcat"
-		} else {
-			s.Mode = "direct"
-		}
 	}
 	return s
 }
@@ -1392,7 +1334,6 @@ func (a *TrayApp) GetAppSettings() AppSettings {
 		DoH:       a.IsDNSOverHTTPSEnabled(),
 		BlockQUIC: a.IsBlockQUICEnabled(),
 		Region:    a.GetPreferredRegion(),
-		WildCat:   a.IsWildcatEnabled(),
 	}
 }
 
@@ -1425,20 +1366,6 @@ func (a *TrayApp) ApplyWindowSettings(s AppSettings) {
 		if a.onBlockQUICChange != nil {
 			a.onBlockQUICChange(s.BlockQUIC)
 		}
-	}
-	// WildCat
-	if s.WildCat != a.IsWildcatEnabled() {
-		if a.mWildcat != nil {
-			if s.WildCat {
-				a.mWildcat.Check()
-			} else {
-				a.mWildcat.Uncheck()
-			}
-		}
-		if a.onWildcatChange != nil {
-			a.onWildcatChange(s.WildCat)
-		}
-		a.refreshBlockQUICVisibility()
 	}
 	// Region
 	if s.Region != a.GetPreferredRegion() {

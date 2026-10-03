@@ -33,8 +33,7 @@ const (
 
 // signupWebviewDataPath is WebView2's own profile directory for the sign-up
 // popup -- separate from browserwindow.go's C:\.shortnerdcat\webview2-browser
-// and vkauth's caller-supplied path so a stale/corrupt profile in one never
-// affects the others.
+// so a stale/corrupt profile in one never affects the other.
 const signupWebviewDataPath = `C:\.shortnerdcat\webview2-signup`
 
 // signupURL is the same-origin (https://navlink.net) page loaded into the
@@ -67,10 +66,10 @@ func ShowCreateAccountWebView() (email string) {
 
 		// Full screen, no fixed size: the page itself (signup-app.html) is
 		// laid out to fit any viewport without scrolling, so there is no
-		// benefit to a small fixed-size popup here (unlike browserwindow.go
-		// /vkauth_windows.go, which show real external pages of unknown
-		// length). Width/Height are still passed as a same-size fallback in
-		// case SW_MAXIMIZE below is somehow unavailable.
+		// benefit to a small fixed-size popup here (unlike browserwindow.go,
+		// which shows real external pages of unknown length). Width/Height
+		// are still passed as a same-size fallback in case SW_MAXIMIZE
+		// below is somehow unavailable.
 		sw, _, _ := signupGetSystemMetricsFn.Call(signupSMCXScreen)
 		sh, _, _ := signupGetSystemMetricsFn.Call(signupSMCYScreen)
 		wv := webview2.NewWithOptions(webview2.WebViewOptions{

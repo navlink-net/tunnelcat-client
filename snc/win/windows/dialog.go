@@ -374,20 +374,6 @@ func ShowUpdateAvailableDialog(newVersion string) bool {
 	return ret == idYes
 }
 
-// ShowWildcatWarning shows an unconditional, one-button informational
-// warning explaining WildCat mode's tradeoffs. Shown every time the user
-// turns WildCat mode on (see onWildcatChange in main_windows.go) -- there is
-// no "don't show again" state and no cancel, just an acknowledgement.
-func ShowWildcatWarning() {
-	title, _ := syscall.UTF16PtrFromString(T("wildcat_warning_title"))
-	text, _ := syscall.UTF16PtrFromString(T("wildcat_warning_message"))
-	dlgUser32.NewProc("MessageBoxW").Call(
-		0,
-		uintptr(unsafe.Pointer(text)),
-		uintptr(unsafe.Pointer(title)),
-		0x30) // MB_ICONWARNING | MB_OK
-}
-
 // â”€â”€ DPAPI key storage â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 var (

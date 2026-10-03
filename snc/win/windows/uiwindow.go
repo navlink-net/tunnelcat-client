@@ -548,10 +548,9 @@ func (aw *AppWindow) handleMsg(msg, wp, lp uintptr) uintptr {
 		aw.mu.Unlock()
 		logevent.Emit(binlog.TagSystem, logevent.EventWinUiwindowLifecycle,
 			logevent.Str(logevent.AttrStage, "status"),
-			logevent.Str(logevent.AttrDetail, fmt.Sprintf("connected=%v connecting=%v disconnecting=%v mode=%q tab=%d", s.Connected, s.Connecting, s.Disconnecting, s.Mode, aw.activeTab)))
+			logevent.Str(logevent.AttrDetail, fmt.Sprintf("connected=%v connecting=%v disconnecting=%v tab=%d", s.Connected, s.Connecting, s.Disconnecting, aw.activeTab)))
 		aw.syncConnectButtons()
 		aw.syncWindowIcon()
-		aw.syncBlockQUICLock(s.QUICLocked)
 		aw.syncByteCounterVisibility(s.Connected)
 		uiInvalidateRectFn.Call(aw.hwnd, 0, 0) // bErase=FALSE â€” WM_PAINT double-buffers everything
 		return 0
@@ -1968,28 +1967,6 @@ func (aw *AppWindow) RefreshSettingsState(s AppSettings) {
 	aw.applySettingsToControls(s)
 }
 
-// syncBlockQUICLock greys the "Disable QUIC" checkbox (Settings tab) and
-// menu item while WildCat is forcing QUIC blocked (see
-// TrayApp.IsWildcatQUICLocked) -- the checkbox's own checked state (and the
-// underlying preference behind it) is left untouched, so re-enabling it
-// once WildCat releases the lock shows exactly the state from before.
-func (aw *AppWindow) syncBlockQUICLock(locked bool) {
-	if aw.hBlockQUIC != 0 {
-		enable := uintptr(1)
-		if locked {
-			enable = 0
-		}
-		uiEnableWindowFn.Call(aw.hBlockQUIC, enable)
-	}
-	if aw.hMenuMain != 0 {
-		flag := uintptr(uiMF_BYCOMMAND | uiMF_ENABLED)
-		if locked {
-			flag = uiMF_BYCOMMAND | uiMF_GRAYED
-		}
-		uiEnableMenuItemFn.Call(aw.hMenuMain, uiIDMenuBlockQUIC, flag)
-	}
-}
-
 // syncByteCounterVisibility shows the uplink/downlink STATIC control while
 // connected and hides it otherwise (per-session counter, nothing to display
 // -- and nothing meaningful -- before a tunnel exists). Called from the
@@ -2045,7 +2022,7 @@ func (aw *AppWindow) UpdateStatus(s AppStatus) {
 	}
 	logevent.Emit(binlog.TagSystem, logevent.EventWinUiwindowLifecycle,
 		logevent.Str(logevent.AttrStage, "status"),
-		logevent.Str(logevent.AttrDetail, fmt.Sprintf("UpdateStatus connected=%v connecting=%v disconnecting=%v mode=%q hwnd=0x%x", s.Connected, s.Connecting, s.Disconnecting, s.Mode, aw.hwnd)))
+		logevent.Str(logevent.AttrDetail, fmt.Sprintf("UpdateStatus connected=%v connecting=%v disconnecting=%v hwnd=0x%x", s.Connected, s.Connecting, s.Disconnecting, aw.hwnd)))
 	aw.mu.Lock()
 	aw.status = s
 	aw.mu.Unlock()

@@ -2274,9 +2274,7 @@ func main() {
 						}
 						return dialerPool.Pick()
 					},
-					func() bool {
-						return trayApp != nil && trayApp.IsWildcatEnabled()
-					},
+					nil,
 				)
 			}
 		})
@@ -2807,9 +2805,7 @@ func main() {
 				}
 				return dialerPool.Pick()
 			},
-			func() bool {
-				return trayApp != nil && trayApp.IsWildcatEnabled()
-			},
+			nil,
 		)
 		// Populate the Settings-tab checkbox with this account's real
 		// preference now that a tunnel exists to ask the arbiter over --
@@ -2849,9 +2845,7 @@ func main() {
 				}
 				return dialerPool.Pick()
 			},
-			func() bool {
-				return trayApp != nil && trayApp.IsWildcatEnabled()
-			},
+			nil,
 		)
 
 		// Propagate client country to router once bypass CIDR data is loaded,
@@ -2967,17 +2961,12 @@ func main() {
 			}
 		}()
 
-		// This is the non-WildCat connect path -- the WildCat branch further up
-		// this function returns before ever reaching here (see its own
-		// IncConnect/StartWildcatSession calls).
 		connStatsCollector.IncConnect(!autoReconnect)
 		go runTopup()
 		return nil
 	}
 
 	onDisconnect := func(autoReconnect bool) {
-		// No-op if no WildCat session is active (regular connect, or already
-		// closed out above).
 		connStatsCollector.IncDisconnect(!autoReconnect)
 		if autoReconnect {
 			logevent.Emit(binlog.TagSystem, logevent.EventWinDisconnect, logevent.Str(logevent.AttrStage, "auto_reconnect"))
@@ -3111,7 +3100,7 @@ func main() {
 	}
 
 	logevent.Emit(binlog.TagSystem, logevent.EventWinTrayStart)
-	trayApp = snwin.NewTrayApp(core.Version, initialLogin, autoConnect, settings.DOHEnabled, initBlockQUIC, settings.WildcatEnabled, settings.PreferredRegion,
+	trayApp = snwin.NewTrayApp(core.Version, initialLogin, autoConnect, settings.DOHEnabled, initBlockQUIC, settings.PreferredRegion,
 		onLogin, onLogout, onConnect, onDisconnect,
 		func(enabled bool) {
 			settings.DOHEnabled = enabled
@@ -3190,19 +3179,6 @@ func main() {
 			if socks5 != nil {
 				socks5.BlockQUIC = enabled
 			}
-		},
-		func(enabled bool) {
-			if enabled {
-				// Unconditional informational warning -- always shown when the
-				// user turns WildCat on, every time, no "don't show again".
-				snwin.ShowWildcatWarning()
-			}
-			settings.WildcatEnabled = enabled
-			saveClientSettings(appDataDir, settings)
-			logevent.Emit(binlog.TagSystem, logevent.EventWinSettingsChange,
-				logevent.Str(logevent.AttrSetting, "wildcat"),
-				logevent.Str(logevent.AttrValue, fmt.Sprintf("%v", enabled)))
-			// WildCat mode switches the underlying transport; always requires reconnect.
 		},
 		func(region string) {
 			settings.PreferredRegion = region
@@ -3327,7 +3303,6 @@ type clientSettings struct {
 	DOHEnabled      bool   `json:"doh_enabled"`
 	BlockQUIC       *bool  `json:"block_quic,omitempty"`       // nil = use CC-based default (RU/CN); explicit = user override
 	PreferredRegion string `json:"preferred_region,omitempty"` // "" = Auto; "RU"/"EU"/"US"/"CN"/"XX"
-	WildcatEnabled  bool   `json:"wildcat_enabled,omitempty"`  // route via the WildCat covert-relay transport
 }
 
 func loadClientSettings(dir string) clientSettings {
