@@ -30,7 +30,9 @@ import (
 //  3. IANA timezone â†’ country (instant, no dialog, updates with system clock)
 //
 // Returns "" if none of the sources yield a result.
-func detectDeviceCC() string {
+func detectDeviceCC() string { return core.RegionBucket(detectDeviceCCRaw()) }
+
+func detectDeviceCCRaw() string {
 	if cc := gpsCC(5 * time.Second); cc != "" {
 		logevent.Emit(binlog.TagSystem, logevent.EventWinGeoDetect,
 			logevent.Str(logevent.AttrSource, "gps"),
@@ -133,9 +135,9 @@ try {
 // Returns "" if no box matches.
 func latLonToCC(lat, lon float64) string {
 	type box struct {
-		cc                    string
-		latMin, latMax        float64
-		lonMin, lonMax        float64
+		cc             string
+		latMin, latMax float64
+		lonMin, lonMax float64
 	}
 	// Listed from smallest to largest; the algorithm picks smallest matching
 	// area automatically, so ordering only affects ties.

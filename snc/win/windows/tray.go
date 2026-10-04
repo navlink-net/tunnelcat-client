@@ -189,6 +189,8 @@ type TrayApp struct {
 	mRegionEurope  *systray.MenuItem // radio: Europe
 	mRegionUSA     *systray.MenuItem // radio: USA
 	mRegionChina   *systray.MenuItem // radio: China
+	mRegionIran    *systray.MenuItem // radio: Iran
+	mRegionLatam   *systray.MenuItem // radio: Latin America
 	mRegionOther   *systray.MenuItem // radio: Other
 	mUpdate        *systray.MenuItem // shown only when a newer binary has been downloaded
 	updateNotifyCh chan string       // receives new version string when update is ready
@@ -309,7 +311,7 @@ func (a *TrayApp) GetPreferredRegion() string {
 
 // setRegion selects a region radio button and notifies the callback.
 func (a *TrayApp) setRegion(code string, selected *systray.MenuItem) {
-	items := []*systray.MenuItem{a.mRegionAuto, a.mRegionRussia, a.mRegionEurope, a.mRegionUSA, a.mRegionChina, a.mRegionOther}
+	items := []*systray.MenuItem{a.mRegionAuto, a.mRegionRussia, a.mRegionEurope, a.mRegionUSA, a.mRegionChina, a.mRegionIran, a.mRegionLatam, a.mRegionOther}
 	for _, it := range items {
 		if it == selected {
 			it.Check()
@@ -338,6 +340,10 @@ func regionName(code string) string {
 		return T("region_usa")
 	case "CN":
 		return T("region_china")
+	case "IR":
+		return T("region_iran")
+	case "LATAM":
+		return T("region_latam")
 	case "XX":
 		return T("region_other")
 	default:
@@ -370,6 +376,8 @@ func (a *TrayApp) onReady() {
 	a.mRegionEurope = a.mRegion.AddSubMenuItemCheckbox(T("region_europe"), T("region_europe"), a.preferredRegion == "EU")
 	a.mRegionUSA = a.mRegion.AddSubMenuItemCheckbox(T("region_usa"), T("region_usa_full"), a.preferredRegion == "US")
 	a.mRegionChina = a.mRegion.AddSubMenuItemCheckbox(T("region_china"), T("region_china"), a.preferredRegion == "CN")
+	a.mRegionIran = a.mRegion.AddSubMenuItemCheckbox(T("region_iran"), T("region_iran"), a.preferredRegion == "IR")
+	a.mRegionLatam = a.mRegion.AddSubMenuItemCheckbox(T("region_latam"), T("region_latam_full"), a.preferredRegion == "LATAM")
 	a.mRegionOther = a.mRegion.AddSubMenuItemCheckbox(T("region_other"), T("tray_region_other_tip"), a.preferredRegion == "XX")
 	systray.AddSeparator()
 	mAbout := systray.AddMenuItem(T("tray_about"), T("tray_about_tip"))
@@ -482,6 +490,12 @@ func (a *TrayApp) onReady() {
 			case <-a.mRegionChina.ClickedCh:
 				logevent.Emit(binlog.TagSystem, logevent.EventWinTrayMenuAction, logevent.Str(logevent.AttrAction, "region_cn"))
 				a.setRegion("CN", a.mRegionChina)
+			case <-a.mRegionIran.ClickedCh:
+				logevent.Emit(binlog.TagSystem, logevent.EventWinTrayMenuAction, logevent.Str(logevent.AttrAction, "region_ir"))
+				a.setRegion("IR", a.mRegionIran)
+			case <-a.mRegionLatam.ClickedCh:
+				logevent.Emit(binlog.TagSystem, logevent.EventWinTrayMenuAction, logevent.Str(logevent.AttrAction, "region_latam"))
+				a.setRegion("LATAM", a.mRegionLatam)
 			case <-a.mRegionOther.ClickedCh:
 				logevent.Emit(binlog.TagSystem, logevent.EventWinTrayMenuAction, logevent.Str(logevent.AttrAction, "region_other"))
 				a.setRegion("XX", a.mRegionOther)
@@ -1230,7 +1244,7 @@ func (a *TrayApp) IsUpdateReady() bool {
 	return a.updateReady
 }
 
-// SetRegionByCode selects a region by code ("" = Auto; "RU"/"EU"/"US"/"CN"/"XX")
+// SetRegionByCode selects a region by code ("" = Auto; "RU"/"EU"/"US"/"CN"/"IR"/"LATAM"/"XX")
 // from the app window's menu, without needing a *systray.MenuItem reference.
 // Safe to call from any goroutine.
 func (a *TrayApp) SetRegionByCode(code string) {
@@ -1244,6 +1258,10 @@ func (a *TrayApp) SetRegionByCode(code string) {
 		selected = a.mRegionUSA
 	case "CN":
 		selected = a.mRegionChina
+	case "IR":
+		selected = a.mRegionIran
+	case "LATAM":
+		selected = a.mRegionLatam
 	case "XX":
 		selected = a.mRegionOther
 	default:
@@ -1379,6 +1397,10 @@ func (a *TrayApp) ApplyWindowSettings(s AppSettings) {
 				a.setRegion("US", a.mRegionUSA)
 			case "CN":
 				a.setRegion("CN", a.mRegionChina)
+			case "IR":
+				a.setRegion("IR", a.mRegionIran)
+			case "LATAM":
+				a.setRegion("LATAM", a.mRegionLatam)
 			case "XX":
 				a.setRegion("XX", a.mRegionOther)
 			default:

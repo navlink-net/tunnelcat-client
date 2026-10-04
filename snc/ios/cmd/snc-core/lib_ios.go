@@ -377,8 +377,8 @@ func runTunnel(stopCh <-chan struct{}) {
 	// Country detection: timezone fallback (GPS APIs not available from NE extension).
 	clientCC := loadCountry(dataDir)
 	if tz := snc.TimezoneCC(); tz != "" && clientCC == "" {
-		clientCC = tz
-		saveCountry(dataDir, tz)
+		clientCC = snc.RegionBucket(tz)
+		saveCountry(dataDir, clientCC)
 	}
 	snc.Log.Printf("snc-core-ios: country=%q nodeID=%.8s...", clientCC, nodeID)
 
@@ -459,7 +459,7 @@ func runTunnel(stopCh <-chan struct{}) {
 		for _, u := range allURLs {
 			addr := strings.TrimPrefix(u, "https://")
 			cc := cachedRegions[addr]
-			if cc == "RU" || cc == "CN" {
+			if snc.IsRiskyJurisdiction(cc) {
 				deprioritized = append(deprioritized, u)
 			} else {
 				preferred = append(preferred, u)

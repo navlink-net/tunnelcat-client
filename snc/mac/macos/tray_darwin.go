@@ -108,6 +108,8 @@ type TrayApp struct {
 	mRegionEurope  *systray.MenuItem
 	mRegionUSA     *systray.MenuItem
 	mRegionChina   *systray.MenuItem
+	mRegionIran    *systray.MenuItem
+	mRegionLatam   *systray.MenuItem
 	mRegionOther   *systray.MenuItem
 	mUpdate        *systray.MenuItem
 	mShareLogs     *systray.MenuItem
@@ -363,12 +365,14 @@ func (a *TrayApp) ApplyWindowSettings(s AppSettings) {
 // setRegionByCode selects the region radio button matching code and fires callbacks.
 func (a *TrayApp) setRegionByCode(code string) {
 	items := map[string]*systray.MenuItem{
-		"":   a.mRegionAuto,
-		"RU": a.mRegionRussia,
-		"EU": a.mRegionEurope,
-		"US": a.mRegionUSA,
-		"CN": a.mRegionChina,
-		"XX": a.mRegionOther,
+		"":      a.mRegionAuto,
+		"RU":    a.mRegionRussia,
+		"EU":    a.mRegionEurope,
+		"US":    a.mRegionUSA,
+		"CN":    a.mRegionChina,
+		"IR":    a.mRegionIran,
+		"LATAM": a.mRegionLatam,
+		"XX":    a.mRegionOther,
 	}
 	if item, ok := items[code]; ok && item != nil {
 		a.setRegion(code, item)
@@ -558,6 +562,10 @@ func (a *TrayApp) onReady() {
 	fmt.Fprintf(os.Stderr, "tray: AddSubMenuItemCheckbox mRegionUSA done\n")
 	a.mRegionChina = a.mRegion.AddSubMenuItemCheckbox(T("tray_region_cn"), T("tray_region_cn_tip"), a.preferredRegion == "CN")
 	fmt.Fprintf(os.Stderr, "tray: AddSubMenuItemCheckbox mRegionChina done\n")
+	a.mRegionIran = a.mRegion.AddSubMenuItemCheckbox(T("tray_region_ir"), T("tray_region_ir_tip"), a.preferredRegion == "IR")
+	fmt.Fprintf(os.Stderr, "tray: AddSubMenuItemCheckbox mRegionIran done\n")
+	a.mRegionLatam = a.mRegion.AddSubMenuItemCheckbox(T("tray_region_latam"), T("tray_region_latam_tip"), a.preferredRegion == "LATAM")
+	fmt.Fprintf(os.Stderr, "tray: AddSubMenuItemCheckbox mRegionLatam done\n")
 	a.mRegionOther = a.mRegion.AddSubMenuItemCheckbox(T("tray_region_other"), T("tray_region_other_tip"), a.preferredRegion == "XX")
 	fmt.Fprintf(os.Stderr, "tray: AddSubMenuItemCheckbox mRegionOther done\n")
 	a.mWildcat = systray.AddMenuItem(T("tray_wildcat"), T("tray_wildcat_tip"))
@@ -680,6 +688,10 @@ func (a *TrayApp) onReady() {
 				a.setRegion("US", a.mRegionUSA)
 			case <-a.mRegionChina.ClickedCh:
 				a.setRegion("CN", a.mRegionChina)
+			case <-a.mRegionIran.ClickedCh:
+				a.setRegion("IR", a.mRegionIran)
+			case <-a.mRegionLatam.ClickedCh:
+				a.setRegion("LATAM", a.mRegionLatam)
 			case <-a.mRegionOther.ClickedCh:
 				a.setRegion("XX", a.mRegionOther)
 
@@ -1041,7 +1053,7 @@ func (a *TrayApp) doReconnect() {
 }
 
 func (a *TrayApp) setRegion(code string, selected *systray.MenuItem) {
-	items := []*systray.MenuItem{a.mRegionAuto, a.mRegionRussia, a.mRegionEurope, a.mRegionUSA, a.mRegionChina, a.mRegionOther}
+	items := []*systray.MenuItem{a.mRegionAuto, a.mRegionRussia, a.mRegionEurope, a.mRegionUSA, a.mRegionChina, a.mRegionIran, a.mRegionLatam, a.mRegionOther}
 	for _, it := range items {
 		if it == selected {
 			it.Check()
@@ -1068,6 +1080,10 @@ func regionName(code string) string {
 		return "USA"
 	case "CN":
 		return "China"
+	case "IR":
+		return "Iran"
+	case "LATAM":
+		return "Latin America"
 	case "XX":
 		return "Other"
 	default:

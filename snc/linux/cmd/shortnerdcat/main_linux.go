@@ -1753,7 +1753,7 @@ func main() {
 			socks5.BlockQUIC = *settings.BlockQUIC
 		} else {
 			cc := lastKnownCountry
-			socks5.BlockQUIC = cc == "RU" || cc == "CN"
+			socks5.BlockQUIC = core.IsRiskyJurisdiction(cc)
 		}
 		if socks5.BlockQUIC {
 			core.Log.Printf("connect: QUIC (UDP:443) blocked")
@@ -2089,7 +2089,7 @@ func main() {
 	}
 
 	// â”€â”€ Tray init / relaunch monitor â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-	initBlockQUIC := lastKnownCountry == "RU" || lastKnownCountry == "CN"
+	initBlockQUIC := core.IsRiskyJurisdiction(lastKnownCountry)
 	if settings.BlockQUIC != nil {
 		initBlockQUIC = *settings.BlockQUIC
 	}

@@ -112,7 +112,10 @@ final class RegionViewController: UIViewController {
     }
 
     private func countryFlag(_ cc: String) -> String {
-        cc.uppercased().unicodeScalars.compactMap {
+        // Region buckets that aren't ISO country codes (e.g. "LATAM") have no
+        // flag emoji; regional-indicator letters would render as garbage.
+        if cc.count != 2 { return cc.uppercased() == "LATAM" ? "🌎" : "🌐" }
+        return cc.uppercased().unicodeScalars.compactMap {
             Unicode.Scalar(127397 + $0.value)
         }.map(String.init).joined()
     }

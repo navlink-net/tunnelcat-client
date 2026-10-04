@@ -1698,11 +1698,10 @@ func main() {
 			// order within each group. buildViableAddrs already sorted by RTT, so
 			// SliceStable keeps that order intact within the two groups.
 			sort.SliceStable(extra, func(i, j int) bool {
-				isRuCn := func(addr string) bool {
-					cc := regions[addr]
-					return cc == "RU" || cc == "CN"
+				isRisky := func(addr string) bool {
+					return core.IsRiskyJurisdiction(regions[addr])
 				}
-				di, dj := isRuCn(extra[i]), isRuCn(extra[j])
+				di, dj := isRisky(extra[i]), isRisky(extra[j])
 				if di != dj {
 					return !di // non-RU/CN first
 				}
@@ -2106,7 +2105,7 @@ func main() {
 			socks5.BlockQUIC = *settings.BlockQUIC
 		} else {
 			cc := lastKnownCountry
-			socks5.BlockQUIC = cc == "RU" || cc == "CN"
+			socks5.BlockQUIC = core.IsRiskyJurisdiction(cc)
 		}
 		if socks5.BlockQUIC {
 			core.Log.Printf("connect: QUIC (UDP:443) blocked (blockQUIC=%v)", socks5.BlockQUIC)
@@ -2498,7 +2497,7 @@ func main() {
 	// Sends init to every tray process that connects (initial launch or relaunch
 	// after the process is killed, e.g. during system sleep).  When the tray
 	// disconnects unexpectedly, relaunches it after a short delay.
-	initBlockQUIC := lastKnownCountry == "RU" || lastKnownCountry == "CN"
+	initBlockQUIC := core.IsRiskyJurisdiction(lastKnownCountry)
 	if settings.BlockQUIC != nil {
 		initBlockQUIC = *settings.BlockQUIC
 	}

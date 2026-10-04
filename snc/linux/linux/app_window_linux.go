@@ -647,6 +647,8 @@ body{
             <option value="EU">{{T:region_opt_europe}}</option>
             <option value="US">{{T:region_opt_usa}}</option>
             <option value="CN">{{T:region_opt_china}}</option>
+            <option value="IR">{{T:region_opt_iran}}</option>
+            <option value="LATAM">{{T:region_opt_latam}}</option>
             <option value="XX">{{T:region_opt_other}}</option>
           </select>
         </div>

@@ -233,6 +233,11 @@ const (
 	// submenu above.
 	uiIDMenuRecommend = 319
 
+	// Region menu items added after the original block above (IDs 307-312
+	// were already contiguous with About/Update/Quit at 313-315).
+	uiIDMenuRegionIran  = 320
+	uiIDMenuRegionLatam = 321
+
 	// Menu API flags/constants.
 	uiMF_STRING    = 0x00000000
 	uiMF_POPUP     = 0x00000010
@@ -438,12 +443,12 @@ type AppWindow struct {
 	// docs/LOG_UPLOAD_PRIVACY.md. May be nil before login/first connect.
 	LogUploadToggleFn func(enabled bool)
 	LoginFn           func()
-	LogoutFn      func()
-	AboutFn       func()
-	UpdateFn      func()
-	QuitFn        func()
-	UpdateReadyFn func() bool
-	RecommendFn   func(username string) // called with the entered username after ShowRecommendDialog submits; may be nil
+	LogoutFn          func()
+	AboutFn           func()
+	UpdateFn          func()
+	QuitFn            func()
+	UpdateReadyFn     func() bool
+	RecommendFn       func(username string) // called with the entered username after ShowRecommendDialog submits; may be nil
 
 	// Native menu-bar handles (see createMenuBar).
 	hMenuMain    uintptr
@@ -1059,6 +1064,10 @@ func (aw *AppWindow) handleCommand(id, notif uint16) {
 		aw.setMenuRegion("US")
 	case uiIDMenuRegionChina:
 		aw.setMenuRegion("CN")
+	case uiIDMenuRegionIran:
+		aw.setMenuRegion("IR")
+	case uiIDMenuRegionLatam:
+		aw.setMenuRegion("LATAM")
 	case uiIDMenuRegionOther:
 		aw.setMenuRegion("XX")
 	case uiIDMenuPreviewRegular:
@@ -1740,6 +1749,8 @@ func (aw *AppWindow) createMenuBar() uintptr {
 	appendStr(hRegion, uiIDMenuRegionEurope, T("region_europe"))
 	appendStr(hRegion, uiIDMenuRegionUSA, T("region_usa"))
 	appendStr(hRegion, uiIDMenuRegionChina, T("region_china"))
+	appendStr(hRegion, uiIDMenuRegionIran, T("region_iran"))
+	appendStr(hRegion, uiIDMenuRegionLatam, T("region_latam"))
 	appendStr(hRegion, uiIDMenuRegionOther, T("region_other"))
 	aw.hMenuRegion = hRegion
 	appendPopup(hMain, hRegion, T("menu_region"))
@@ -1795,12 +1806,14 @@ func (aw *AppWindow) syncMenuState(s AppSettings) {
 
 	if aw.hMenuRegion != 0 {
 		regionIDs := map[string]uintptr{
-			"":   uiIDMenuRegionAuto,
-			"RU": uiIDMenuRegionRussia,
-			"EU": uiIDMenuRegionEurope,
-			"US": uiIDMenuRegionUSA,
-			"CN": uiIDMenuRegionChina,
-			"XX": uiIDMenuRegionOther,
+			"":      uiIDMenuRegionAuto,
+			"RU":    uiIDMenuRegionRussia,
+			"EU":    uiIDMenuRegionEurope,
+			"US":    uiIDMenuRegionUSA,
+			"CN":    uiIDMenuRegionChina,
+			"IR":    uiIDMenuRegionIran,
+			"LATAM": uiIDMenuRegionLatam,
+			"XX":    uiIDMenuRegionOther,
 		}
 		for code, id := range regionIDs {
 			uiCheckMenuItemFn.Call(aw.hMenuRegion, id, checkFlag(code == s.Region))
@@ -1899,7 +1912,7 @@ func (aw *AppWindow) createControls(hInst uintptr) {
 	aw.hRegion = mk("COMBOBOX",
 		uiCBSDROPDOWNLIST|uiCBSHASSTRINGS|uiWS_TABSTOP,
 		sx, uiContY+58, 200, 200, uiIDRegion)
-	for _, entry := range []string{T("region_auto_detect"), T("region_russia"), T("region_europe"), T("region_usa"), T("region_china"), T("region_other")} {
+	for _, entry := range []string{T("region_auto_detect"), T("region_russia"), T("region_europe"), T("region_usa"), T("region_china"), T("region_iran"), T("region_latam"), T("region_other")} {
 		ep, _ := windows.UTF16PtrFromString(entry)
 		uiSendMessageFn.Call(aw.hRegion, uiCB_ADDSTRING, 0, uintptr(unsafe.Pointer(ep)))
 	}
@@ -2079,7 +2092,9 @@ func comboGetSel(hwnd uintptr) int {
 	return int(int32(r))
 }
 
-// regionToIndex maps a region code to the combobox index (0..5).
+// regionToIndex maps a region code to the combobox index (0..7). The order
+// must match the entries appended in the combobox setup (Auto, Russia,
+// Europe, USA, China, Iran, Latin America, Other).
 func regionToIndex(code string) int {
 	switch code {
 	case "RU":
@@ -2090,8 +2105,12 @@ func regionToIndex(code string) int {
 		return 3
 	case "CN":
 		return 4
-	case "XX":
+	case "IR":
 		return 5
+	case "LATAM":
+		return 6
+	case "XX":
+		return 7
 	default:
 		return 0 // Auto
 	}
@@ -2109,6 +2128,10 @@ func regionFromIndex(i int) string {
 	case 4:
 		return "CN"
 	case 5:
+		return "IR"
+	case 6:
+		return "LATAM"
+	case 7:
 		return "XX"
 	default:
 		return ""

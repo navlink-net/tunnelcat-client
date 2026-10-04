@@ -434,6 +434,7 @@ func main() {
 			snc.Log.Printf("snc-core: device country from timezone=%q", deviceCC)
 		}
 	}
+	deviceCC = snc.RegionBucket(deviceCC)
 	androidcore.LogNetworkInterfaces()
 	deviceID := loadOrCreateDeviceID(dataDir)
 
@@ -619,7 +620,7 @@ func main() {
 		for _, u := range urls {
 			addr := strings.TrimPrefix(u, "https://")
 			cc := cachedRegions[addr]
-			if cc == "RU" || cc == "CN" {
+			if snc.IsRiskyJurisdiction(cc) {
 				deprioritized = append(deprioritized, u)
 			} else {
 				preferred = append(preferred, u)
@@ -852,7 +853,7 @@ func main() {
 	// Block QUIC (UDP:443): QUIC over a TCP-based SNC tunnel performs poorly due to
 	// UDP-in-TCP head-of-line blocking. Enabled automatically for RU/CN, or explicitly
 	// by the user via SNC_BLOCK_QUIC=1 (set by the Disable QUIC menu toggle).
-	blockQUIC := clientCC == "RU" || clientCC == "CN"
+	blockQUIC := snc.IsRiskyJurisdiction(clientCC)
 	if os.Getenv("SNC_BLOCK_QUIC") == "1" {
 		blockQUIC = true
 	}

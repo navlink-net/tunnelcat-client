@@ -99,6 +99,8 @@ type TrayApp struct {
 	mRegionEurope  *systray.MenuItem
 	mRegionUSA     *systray.MenuItem
 	mRegionChina   *systray.MenuItem
+	mRegionIran    *systray.MenuItem
+	mRegionLatam   *systray.MenuItem
 	mRegionOther   *systray.MenuItem
 	mOpen          *systray.MenuItem
 	mUpdate        *systray.MenuItem
@@ -517,6 +519,8 @@ func (a *TrayApp) onReady() {
 	a.mRegionEurope = a.mRegion.AddSubMenuItemCheckbox(T("region_europe"), T("region_europe"), a.preferredRegion == "EU")
 	a.mRegionUSA = a.mRegion.AddSubMenuItemCheckbox(T("region_usa"), T("region_usa_full"), a.preferredRegion == "US")
 	a.mRegionChina = a.mRegion.AddSubMenuItemCheckbox(T("region_china"), T("region_china"), a.preferredRegion == "CN")
+	a.mRegionIran = a.mRegion.AddSubMenuItemCheckbox(T("region_iran"), T("region_iran"), a.preferredRegion == "IR")
+	a.mRegionLatam = a.mRegion.AddSubMenuItemCheckbox(T("region_latam"), T("region_latam_full"), a.preferredRegion == "LATAM")
 	a.mRegionOther = a.mRegion.AddSubMenuItemCheckbox(T("region_other"), T("region_other_tooltip"), a.preferredRegion == "XX")
 	systray.AddSeparator()
 	a.mOpen = systray.AddMenuItem(T("menu_open_title"), T("menu_open_tooltip"))
@@ -619,6 +623,10 @@ func (a *TrayApp) onReady() {
 				a.setRegion("US", a.mRegionUSA)
 			case <-a.mRegionChina.ClickedCh:
 				a.setRegion("CN", a.mRegionChina)
+			case <-a.mRegionIran.ClickedCh:
+				a.setRegion("IR", a.mRegionIran)
+			case <-a.mRegionLatam.ClickedCh:
+				a.setRegion("LATAM", a.mRegionLatam)
 			case <-a.mRegionOther.ClickedCh:
 				a.setRegion("XX", a.mRegionOther)
 
@@ -981,7 +989,7 @@ func (a *TrayApp) doReconnect() {
 func (a *TrayApp) setRegion(code string, selected *systray.MenuItem) {
 	items := []*systray.MenuItem{
 		a.mRegionAuto, a.mRegionRussia, a.mRegionEurope,
-		a.mRegionUSA, a.mRegionChina, a.mRegionOther,
+		a.mRegionUSA, a.mRegionChina, a.mRegionIran, a.mRegionLatam, a.mRegionOther,
 	}
 	for _, it := range items {
 		if it == selected {
@@ -1009,6 +1017,10 @@ func regionName(code string) string {
 		return T("region_usa")
 	case "CN":
 		return T("region_china")
+	case "IR":
+		return T("region_iran")
+	case "LATAM":
+		return T("region_latam")
 	case "XX":
 		return T("region_other")
 	default:

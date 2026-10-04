@@ -19,7 +19,9 @@ import (
 //  2. IANA timezone â†’ country fallback
 //
 // Returns "" if none of the sources yield a result.
-func detectDeviceCC() string {
+func detectDeviceCC() string { return core.RegionBucket(detectDeviceCCRaw()) }
+
+func detectDeviceCCRaw() string {
 	if cc := systemCC(); cc != "" {
 		core.Log.Printf("geo: system-locale country=%q", cc)
 		return cc

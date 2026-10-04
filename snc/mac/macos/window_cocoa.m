@@ -821,6 +821,8 @@ static NSMenuItem *sncMenuRegionRU;
 static NSMenuItem *sncMenuRegionEU;
 static NSMenuItem *sncMenuRegionUS;
 static NSMenuItem *sncMenuRegionCN;
+static NSMenuItem *sncMenuRegionIR;
+static NSMenuItem *sncMenuRegionLATAM;
 static NSMenuItem *sncMenuRegionXX;
 static NSMenuItem *sncMenuUpdate;
 
@@ -894,6 +896,8 @@ void snc_window_build_app_menu(void) {
                 @[SNCT("menu_region_eu"),    @"EU"],
                 @[SNCT("menu_region_us"),    @"US"],
                 @[SNCT("menu_region_cn"),    @"CN"],
+                @[SNCT("menu_region_ir"),    @"IR"],
+                @[SNCT("menu_region_latam"), @"LATAM"],
                 @[SNCT("menu_region_other"), @"XX"],
             ];
             NSMutableArray *sncRegionMenuItems = [NSMutableArray array];
@@ -911,7 +915,9 @@ void snc_window_build_app_menu(void) {
             sncMenuRegionEU   = sncRegionMenuItems[2];
             sncMenuRegionUS   = sncRegionMenuItems[3];
             sncMenuRegionCN   = sncRegionMenuItems[4];
-            sncMenuRegionXX   = sncRegionMenuItems[5];
+            sncMenuRegionIR   = sncRegionMenuItems[5];
+            sncMenuRegionLATAM = sncRegionMenuItems[6];
+            sncMenuRegionXX   = sncRegionMenuItems[7];
 
             [appMenu addItem:[NSMenuItem separatorItem]];
             makeItem(appMenu, SNCT("menu_about"), @selector(menuAbout:));
@@ -937,6 +943,8 @@ void snc_window_sync_app_menu(int doh, int quic, const char *region, int updateR
             sncMenuRegionEU.state   = ([code isEqualToString:@"EU"]) ? NSControlStateValueOn : NSControlStateValueOff;
             sncMenuRegionUS.state   = ([code isEqualToString:@"US"]) ? NSControlStateValueOn : NSControlStateValueOff;
             sncMenuRegionCN.state   = ([code isEqualToString:@"CN"]) ? NSControlStateValueOn : NSControlStateValueOff;
+            sncMenuRegionIR.state   = ([code isEqualToString:@"IR"]) ? NSControlStateValueOn : NSControlStateValueOff;
+            sncMenuRegionLATAM.state = ([code isEqualToString:@"LATAM"]) ? NSControlStateValueOn : NSControlStateValueOff;
             sncMenuRegionXX.state   = ([code isEqualToString:@"XX"]) ? NSControlStateValueOn : NSControlStateValueOff;
         }
     });

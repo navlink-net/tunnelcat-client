@@ -79,6 +79,9 @@ var stringsEN = map[string]string{
 	"region_usa":         "USA",
 	"region_usa_full":    "United States",
 	"region_china":       "China",
+	"region_iran":        "Iran",
+	"region_latam":       "Latin America",
+	"region_latam_full":  "Latin America (Mexico, Central & South America)",
 	"region_other":       "Other",
 
 	// -- Tray dynamic tooltip/status fragments --
@@ -192,6 +195,9 @@ var stringsRU = map[string]string{
 	"region_usa":         "США",
 	"region_usa_full":    "Соединённые Штаты",
 	"region_china":       "Китай",
+	"region_iran":        "Иран",
+	"region_latam":       "Латинская Америка",
+	"region_latam_full":  "Латинская Америка (Мексика, Центральная и Южная Америка)",
 	"region_other":       "Другой",
 
 	"tooltip_not_logged_in":   "ShortNerdCat - не выполнен вход",

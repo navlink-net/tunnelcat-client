@@ -540,6 +540,8 @@ body::before{
             <option value="EU">{{T:html_region_eu}}</option>
             <option value="US">{{T:html_region_us}}</option>
             <option value="CN">{{T:html_region_cn}}</option>
+            <option value="IR">{{T:html_region_ir}}</option>
+            <option value="LATAM">{{T:html_region_latam}}</option>
             <option value="XX">{{T:html_region_other}}</option>
           </select>
         </div>

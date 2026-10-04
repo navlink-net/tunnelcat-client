@@ -160,7 +160,22 @@ copy /y "%OUTDIR%\snc-core.armv7" "%~dp0app\src\main\jniLibs\armeabi-v7a\libsnc_
 if not exist "%~dp0app\src\main\jniLibs\x86_64" mkdir "%~dp0app\src\main\jniLibs\x86_64"
 copy /y "%OUTDIR%\snc-core.amd64" "%~dp0app\src\main\jniLibs\x86_64\libsnc_core.so" >nul
 
-call "%~dp0gradlew.bat" assembleRelease --no-daemon -PappVersion=!VERSION!
+:: gradle.properties pins org.gradle.java.home to Android Studio's bundled JBR,
+:: which isn't present on every machine (build fails with "Value ... given for
+:: org.gradle.java.home ... is invalid"). Pick a real JDK 17 ourselves and pass
+:: it on the command line, which overrides gradle.properties.
+set "GRADLE_JDK="
+for /d %%d in ("%ProgramFiles%\Eclipse Adoptium\jdk-17*") do if exist "%%d\bin\java.exe" set "GRADLE_JDK=%%d"
+if "!GRADLE_JDK!"=="" if exist "%ProgramFiles%\Android\Android Studio\jbr\bin\java.exe" set "GRADLE_JDK=%ProgramFiles%\Android\Android Studio\jbr"
+if "!GRADLE_JDK!"=="" if defined JAVA_HOME if exist "!JAVA_HOME!\bin\java.exe" set "GRADLE_JDK=!JAVA_HOME!"
+if "!GRADLE_JDK!"=="" (
+    echo ERROR: no JDK found ^(looked for Eclipse Adoptium jdk-17*, Android Studio jbr, JAVA_HOME^).
+    exit /b 1
+)
+set "JAVA_HOME=!GRADLE_JDK!"
+echo   JDK: !GRADLE_JDK!
+
+call "%~dp0gradlew.bat" assembleRelease --no-daemon -PappVersion=!VERSION! "-Dorg.gradle.java.home=!GRADLE_JDK!"
 if errorlevel 1 (
     echo ERROR: Gradle build failed.
     exit /b 1

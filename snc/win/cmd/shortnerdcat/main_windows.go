@@ -2157,17 +2157,17 @@ func main() {
 				logevent.Int(logevent.AttrNeed, int64(need)),
 				logevent.Int(logevent.AttrCount, int64(len(fallback))))
 			extra := buildViableAddrs(fallback)
-			// Deprioritize RU/CN: sort them after all other regions, preserving RTT
-			// order within each group. buildViableAddrs already sorted by RTT, so
-			// SliceStable keeps that order intact within the two groups.
+			// Deprioritize risky jurisdictions (RU/CN/IR): sort them after all other
+			// regions, preserving RTT order within each group. buildViableAddrs
+			// already sorted by RTT, so SliceStable keeps that order intact within
+			// the two groups.
 			sort.SliceStable(extra, func(i, j int) bool {
-				isRuCn := func(addr string) bool {
-					cc := regions[addr]
-					return cc == "RU" || cc == "CN"
+				isRisky := func(addr string) bool {
+					return core.IsRiskyJurisdiction(regions[addr])
 				}
-				di, dj := isRuCn(extra[i]), isRuCn(extra[j])
+				di, dj := isRisky(extra[i]), isRisky(extra[j])
 				if di != dj {
-					return !di // non-RU/CN first
+					return !di // non-risky first
 				}
 				return false // preserve existing RTT order within group
 			})
@@ -2634,7 +2634,7 @@ func main() {
 			socks5.BlockQUIC = trayApp.IsBlockQUICEnabled()
 		} else if bypassMgr != nil {
 			cc := bypassMgr.Country()
-			socks5.BlockQUIC = cc == "RU" || cc == "CN"
+			socks5.BlockQUIC = core.IsRiskyJurisdiction(cc)
 		}
 		if socks5.BlockQUIC {
 			logevent.Emit(binlog.TagSystem, logevent.EventWinConnectFinalize, logevent.Str(logevent.AttrStage, "quic_blocked"))
@@ -3094,7 +3094,7 @@ func main() {
 	upd.Start()
 
 	// Determine initial blockQUIC value: persisted user choice overrides CC-based default.
-	initBlockQUIC := lastKnownCountry == "RU" || lastKnownCountry == "CN"
+	initBlockQUIC := core.IsRiskyJurisdiction(lastKnownCountry)
 	if settings.BlockQUIC != nil {
 		initBlockQUIC = *settings.BlockQUIC
 	}
