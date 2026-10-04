@@ -234,7 +234,12 @@ func runTrayProcess(socketPath string, watchdogRestart bool) {
 				updatePromptOnce.Do(func() {
 					go func() {
 						if snmac.ShowUpdateAvailableAlert(v) {
-							go core.ApplyPendingUpdate()
+							// Must be applied in the daemon, not here -- see
+							// IPCCmd's "apply_update" doc comment. The tray
+							// is a separate, unprivileged process from the
+							// daemon that owns the app bundle's real
+							// executable and the update-check loop.
+							sendCmd(snmac.IPCCmd{T: "apply_update"})
 						}
 					}()
 				})

@@ -2638,6 +2638,14 @@ func main() {
 				default:
 				}
 
+			case "apply_update":
+				// Must run here, in the daemon (root, owns the app bundle's
+				// real executable and the update-check loop) -- see
+				// IPCCmd's "apply_update" doc comment for why doing this
+				// tray-side never actually applied anything.
+				core.Log.Printf("ipc: apply_update requested")
+				go core.ApplyPendingUpdate()
+
 			case "logout":
 				go func() {
 					onDisconnect(false)

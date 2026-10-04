@@ -92,6 +92,18 @@ type IPCMsg struct {
 // IPCCmd is sent from the tray (user) process to the main (root/VPN) process.
 type IPCCmd struct {
 	T string `json:"t"`
+	// "apply_update" — user clicked "Update Now" on the tray's alert.
+	// core.ApplyPendingUpdate() must run in THIS (the daemon) process, not
+	// the tray: it renames/relaunches os.Executable(), and the tray is a
+	// separate, unprivileged, non-root process from the daemon that
+	// actually owns the update-check loop and the app bundle's real
+	// executable permissions -- calling it tray-side silently fails the
+	// rename (wrong user) and, even on success, only respawns a new tray
+	// helper, never the daemon, so the daemon keeps running the old
+	// version and keeps re-offering the same update forever. Confirmed
+	// live from real user reports, 2026-09-30. No extra fields needed;
+	// the daemon already knows what update is pending.
+
 	// "key" — user submitted subscription key
 	Key string `json:"key,omitempty"`
 	// "settings"
